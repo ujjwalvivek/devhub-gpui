@@ -1,0 +1,18 @@
+[package]
+name = "devhub-gpui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "devhub-gpui"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+devhub-core.workspace = true
+gpui.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
+windows.workspace = true
