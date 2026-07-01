@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -65,23 +66,63 @@ pub fn check_ssh_connection(host: &str) -> Result<(), String> {
     }
 }
 
-pub fn open_remote_in_vscode(project: &Project) -> Result<(), String> {
+pub fn open_project_in_zed(project: &Project) -> Result<(), String> {
+    let target = match &project.source {
+        ProjectSource::Local => project.path.as_os_str().to_os_string(),
+        ProjectSource::Remote { .. } => zed_ssh_uri(project)?.into(),
+    };
+
+    if Command::new("zed").arg(&target).spawn().is_ok() {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    for candidate in zed_windows_candidates() {
+        if candidate.is_file() && Command::new(&candidate).arg(&target).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err("Zed was not found. Install Zed or use Open in... to choose another compatible application.".into())
+}
+
+pub fn zed_ssh_uri(project: &Project) -> Result<String, String> {
     let ProjectSource::Remote { host, .. } = &project.source else {
         return Err("project is not remote".into());
     };
     let host = validate_ssh_host(host)?;
-    Command::new("code")
-        .arg("--remote")
-        .arg(format!("ssh-remote+{host}"))
-        .arg(&project.path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| {
-            format!(
-                "starting VS Code Remote SSH: {error}. Install the `code` command and Remote - SSH extension, or open {} on {host} manually",
-                project.path.display()
-            )
+    Ok(format!("ssh://{host}{}", encode_remote_path(&project.path)))
+}
+
+fn encode_remote_path(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    };
+    path.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
         })
+        .collect::<String>()
+}
+
+#[cfg(windows)]
+fn zed_windows_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        candidates.push(local.join("Programs").join("Zed").join("Zed.exe"));
+        candidates.push(local.join("Zed").join("Zed.exe"));
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(program_files).join("Zed").join("Zed.exe"));
+    }
+    candidates
 }
 
 pub fn list_remote_subdirs(host: &str, path: &str) -> Result<Vec<DirectoryEntry>, String> {
@@ -185,28 +226,21 @@ pub fn list_remote_tree(
     };
     let script = format!(
         r#"root={root}
-find "$root" -maxdepth {depth} \( -name .git -o -name node_modules -o -name target -o -name build -o -name dist -o -name .next -o -name vendor -o -name __pycache__{hidden_prune} \) -prune -o -mindepth 1 \( -type d -printf 'd\t%p\n' -o -type f -printf 'f\t%p\n' \) 2>/dev/null | head -n {limit}
+find "$root" -mindepth 1 -maxdepth {depth} \( -name .git -o -name node_modules -o -name target -o -name build -o -name dist -o -name .next -o -name vendor -o -name __pycache__{hidden_prune} \) -prune -o \( -type d -printf 'd\t%p\n' -o -type f -printf 'f\t%p\n' \) 2>/dev/null | head -n {limit}
 "#,
         root = shell_quote(&root),
         depth = max_depth.clamp(1, 20),
         limit = MAX_TREE_ENTRIES + 1,
     );
     let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT)?;
-    let mut entries = output
+    let entries = output
         .lines()
         .take(MAX_TREE_ENTRIES)
         .filter_map(|line| parse_tree_entry(line, &root))
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        left.path
-            .parent()
-            .cmp(&right.path.parent())
-            .then_with(|| right.is_dir.cmp(&left.is_dir))
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-    });
     Ok(TreeListing {
         truncated: output.lines().count() > MAX_TREE_ENTRIES,
-        entries,
+        entries: order_tree_entries(Path::new(&root), entries),
         warnings: Vec::new(),
     })
 }
@@ -407,6 +441,43 @@ fn parse_tree_entry(line: &str, root: &str) -> Option<FileEntry> {
     })
 }
 
+fn order_tree_entries(root: &Path, entries: Vec<FileEntry>) -> Vec<FileEntry> {
+    let mut children = HashMap::<PathBuf, Vec<FileEntry>>::new();
+    for entry in entries {
+        let parent = entry.path.parent().unwrap_or(root).to_path_buf();
+        children.entry(parent).or_default().push(entry);
+    }
+
+    fn append(
+        parent: &Path,
+        children: &mut HashMap<PathBuf, Vec<FileEntry>>,
+        output: &mut Vec<FileEntry>,
+    ) {
+        let Some(mut siblings) = children.remove(parent) else {
+            return;
+        };
+        siblings.sort_by(|left, right| {
+            right
+                .is_dir
+                .cmp(&left.is_dir)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        for entry in siblings {
+            let path = entry.path.clone();
+            let is_dir = entry.is_dir;
+            output.push(entry);
+            if is_dir {
+                append(&path, children, output);
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    append(root, &mut children, &mut output);
+    output
+}
+
 fn parse_grep_hit(line: &str) -> Option<SearchHit> {
     let (path, rest) = line.split_once(':')?;
     let (line, preview) = rest.split_once(':')?;
@@ -491,5 +562,71 @@ mod tests {
     #[test]
     fn shell_quote_handles_single_quotes() {
         assert_eq!(shell_quote("/srv/user's code"), "'/srv/user'\\''s code'");
+    }
+
+    #[test]
+    fn remote_tree_order_keeps_children_below_their_parent() {
+        let root = Path::new("/srv/project");
+        let entries = vec![
+            FileEntry {
+                name: "z.txt".into(),
+                path: root.join("z.txt"),
+                depth: 0,
+                is_dir: false,
+            },
+            FileEntry {
+                name: "main.rs".into(),
+                path: root.join("src/main.rs"),
+                depth: 1,
+                is_dir: false,
+            },
+            FileEntry {
+                name: "src".into(),
+                path: root.join("src"),
+                depth: 0,
+                is_dir: true,
+            },
+        ];
+
+        let ordered = order_tree_entries(root, entries);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["src", "main.rs", "z.txt"]
+        );
+    }
+
+    #[test]
+    fn zed_uri_encodes_remote_paths() {
+        let project = Project {
+            name: "fixture".into(),
+            path: PathBuf::from("/srv/my project/#demo"),
+            source: ProjectSource::Remote {
+                name: "example".into(),
+                host: "dev@example.com".into(),
+            },
+            project_type: ProjectType::Rust,
+            has_git: true,
+            git_remote: None,
+            markers_found: vec!["Cargo.toml".into()],
+            last_modified: None,
+            search_key: String::new(),
+        };
+        assert_eq!(
+            zed_ssh_uri(&project).unwrap(),
+            "ssh://dev@example.com/srv/my%20project/%23demo"
+        );
+
+        let mut port_project = project;
+        port_project.source = ProjectSource::Remote {
+            name: "example".into(),
+            host: "dev@example.com:2222".into(),
+        };
+        assert_eq!(
+            zed_ssh_uri(&port_project).unwrap(),
+            "ssh://dev@example.com:2222/srv/my%20project/%23demo"
+        );
     }
 }

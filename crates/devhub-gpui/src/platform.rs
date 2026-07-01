@@ -26,8 +26,6 @@ pub(crate) fn configure_windows_surface(window: &Window) {
     let corner_preference = DWMWCP_ROUNDSMALL;
     let border_color = 0x000e0e0e_u32;
 
-    // These hints are supported on Windows 11. Older versions may reject them,
-    // in which case their default non-client appearance remains.
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -68,6 +66,30 @@ pub(crate) fn begin_window_drag(window: &Window) {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn toggle_window_zoom(window: &Window) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsZoomed, ShowWindowAsync, SW_MAXIMIZE, SW_RESTORE,
+    };
+
+    let Some(hwnd) = windows_hwnd(window) else {
+        return;
+    };
+    unsafe {
+        let command = if IsZoomed(hwnd).as_bool() {
+            SW_RESTORE
+        } else {
+            SW_MAXIMIZE
+        };
+        let _ = ShowWindowAsync(hwnd, command);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn toggle_window_zoom(window: &Window) {
+    window.zoom_window();
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn begin_window_drag(window: &Window) {
     window.start_window_move();
@@ -75,6 +97,16 @@ pub(crate) fn begin_window_drag(window: &Window) {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn open_with_picker(path: &Path, window: &Window) {
+    open_with_target(path.as_os_str().to_os_string(), window);
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn open_uri_with_picker(uri: &str, window: &Window) {
+    open_with_target(uri.into(), window);
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_target(target: std::ffi::OsString, window: &Window) {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::HWND;
@@ -83,7 +115,7 @@ pub(crate) fn open_with_picker(path: &Path, window: &Window) {
     };
 
     let hwnd_raw = windows_hwnd(window).map(|h| h.0 as isize);
-    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let path_wide: Vec<u16> = target.encode_wide().chain(Some(0)).collect();
 
     std::thread::spawn(move || {
         let hwnd = hwnd_raw.map(|raw| HWND(raw as *mut std::ffi::c_void));
@@ -101,4 +133,9 @@ pub(crate) fn open_with_picker(path: &Path, window: &Window) {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn open_with_picker(path: &Path, _window: &Window) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn open_uri_with_picker(uri: &str, _window: &Window) {
+    let _ = std::process::Command::new("xdg-open").arg(uri).spawn();
 }

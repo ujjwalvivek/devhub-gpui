@@ -10,8 +10,66 @@ fn default_max_depth() -> usize {
     3
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeId {
+    CatppuccinMocha,
+    RosePineMoon,
+    TokyoNightStorm,
+    HorizonBold,
+    #[default]
+    MonochromeZero,
+}
+
+impl ThemeId {
+    pub const ALL: [Self; 5] = [
+        Self::CatppuccinMocha,
+        Self::RosePineMoon,
+        Self::TokyoNightStorm,
+        Self::HorizonBold,
+        Self::MonochromeZero,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CatppuccinMocha => "Catppuccin",
+            Self::RosePineMoon => "Rose Pine",
+            Self::TokyoNightStorm => "Tokyo Night",
+            Self::HorizonBold => "Horizon",
+            Self::MonochromeZero => "Monochrome",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppearanceMode {
+    System,
+    #[default]
+    Dark,
+    Light,
+}
+
+impl AppearanceMode {
+    pub const ALL: [Self; 3] = [Self::System, Self::Dark, Self::Light];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub theme: ThemeId,
+
+    #[serde(default)]
+    pub appearance: AppearanceMode,
+
     #[serde(default)]
     pub scan_dirs: Vec<PathBuf>,
 
@@ -63,6 +121,8 @@ impl RemoteHostConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            theme: ThemeId::default(),
+            appearance: AppearanceMode::default(),
             scan_dirs: Vec::new(),
             max_depth: default_max_depth(),
             remote_hosts: Vec::new(),
@@ -207,6 +267,8 @@ mod tests {
     #[test]
     fn config_roundtrips_through_toml() {
         let config = Config {
+            theme: ThemeId::TokyoNightStorm,
+            appearance: AppearanceMode::System,
             scan_dirs: vec![PathBuf::from(r"C:\projects"), PathBuf::from(r"D:\code")],
             max_depth: 5,
             remote_hosts: vec![RemoteHostConfig {
@@ -223,6 +285,8 @@ mod tests {
         assert_eq!(deserialized.scan_dirs, config.scan_dirs);
         assert_eq!(deserialized.max_depth, 5);
         assert_eq!(deserialized.remote_hosts, config.remote_hosts);
+        assert_eq!(deserialized.theme, ThemeId::TokyoNightStorm);
+        assert_eq!(deserialized.appearance, AppearanceMode::System);
     }
 
     #[test]
@@ -232,6 +296,8 @@ mod tests {
         assert!(config.scan_dirs.is_empty());
         assert_eq!(config.max_depth, 3);
         assert!(config.remote_hosts.is_empty());
+        assert_eq!(config.theme, ThemeId::MonochromeZero);
+        assert_eq!(config.appearance, AppearanceMode::Dark);
     }
 
     #[test]

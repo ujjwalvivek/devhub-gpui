@@ -1,0 +1,27 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="256" height="256" rx="32" fill="#0A0C10"/>
+    <rect x="1.5" y="1.5" width="253" height="253" rx="30.5" stroke="#1F242E" stroke-width="3" opacity="0.6"/>
+  <defs>
+    <linearGradient id="laser-cyan" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#00F0FF"/>
+      <stop offset="100%" stop-color="#0077FF"/>
+    </linearGradient>
+    <linearGradient id="bracket-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2D3545"/>
+      <stop offset="100%" stop-color="#161A22"/>
+    </linearGradient>
+  </defs>
+  <g opacity="0.15" stroke="#475569" stroke-width="1.5" stroke-dasharray="4 4">
+    <line x1="85" y1="40" x2="85" y2="216"/>
+    <line x1="145" y1="40" x2="145" y2="216"/>
+  </g>
+  <g transform="translate(10, 0)">
+    <path d="M 75,65 H 60 V 191 H 75" stroke="url(#bracket-gradient)" stroke-width="12" stroke-linecap="square" stroke-linejoin="miter"/>
+    <path d="M 85,65 H 125 C 165,65 185,90 185,128 C 185,166 165,191 125,191 H 85" stroke="#E2E8F0" stroke-width="12" stroke-linecap="square" stroke-linejoin="miter"/>
+    <path d="M 95,128 H 145" stroke="#475569" stroke-width="6" stroke-linecap="square"/>
+  </g>
+  <g transform="translate(10, 0)">
+    <line x1="192" y1="90" x2="192" y2="166" stroke="url(#laser-cyan)" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="192" cy="90" r="3" fill="#00F0FF"/>
+  </g>
+</svg>

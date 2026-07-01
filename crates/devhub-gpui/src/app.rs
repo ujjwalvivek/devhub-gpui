@@ -1,24 +1,29 @@
-use crate::platform::{begin_window_drag, configure_windows_surface, open_with_picker};
+use crate::assets::Assets;
+use crate::platform::{
+    begin_window_drag, configure_windows_surface, open_uri_with_picker, open_with_picker,
+    toggle_window_zoom,
+};
 use crate::ui::{
     file_icon, message_panel, project_type_color, scan_state_color, scan_status, section_label,
     window_control, workbench_message,
 };
 use devhub_core::{
     list_local_subdirs, list_project_tree, list_remote_subdirs, load_projects, local_roots,
-    open_remote_in_vscode, read_project_file, read_project_readme, save_projects, scan_directories,
+    open_project_in_zed, read_project_file, read_project_readme, save_projects, scan_directories,
     scan_remote_host, search_project_content, sort_projects, validate_remote_path,
-    validate_ssh_host, Config, DirectoryEntry, FileEntry, Project, ProjectSource, ProjectType,
-    RemoteHostConfig, SearchHit, TreeListing,
+    validate_ssh_host, zed_ssh_uri, AppearanceMode, Config, DirectoryEntry, FileEntry, Project,
+    ProjectSource, ProjectType, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
-    language_for_path, markdown_fenced_source, next_selection, previous_selection,
-    sanitize_markdown_images, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
+    language_for_path, markdown_fenced_source, next_selection, omit_markdown_images,
+    previous_selection, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::highlighter::HighlightTheme;
 use gpui_component::input::{Input, InputState, Position};
 use gpui_component::text::{TextView, TextViewStyle};
+use gpui_component::{Icon, IconName};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -52,6 +57,8 @@ struct DevHubLite {
     pending_scan_dirs: Vec<PathBuf>,
     pending_remote_hosts: Vec<RemoteHostConfig>,
     pending_max_depth: usize,
+    pending_theme: ThemeId,
+    pending_appearance: AppearanceMode,
     source_picker: SourcePicker,
     picker_entries: LoadState<Vec<DirectoryEntry>>,
     picker_generation: u64,
@@ -171,6 +178,8 @@ impl DevHubLite {
                 fixtures()
             }
         };
+        let pending_theme = config.theme;
+        let pending_appearance = config.appearance;
 
         Self {
             scan: ScanModel::new(initial_projects),
@@ -185,6 +194,8 @@ impl DevHubLite {
             pending_scan_dirs: Vec::new(),
             pending_remote_hosts: Vec::new(),
             pending_max_depth: 3,
+            pending_theme,
+            pending_appearance,
             source_picker: SourcePicker::Closed,
             picker_entries: LoadState::Idle,
             picker_generation: 0,
@@ -489,7 +500,7 @@ impl DevHubLite {
     fn open_selected_project(
         &mut self,
         _: &OpenSelectedProject,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.filter_query.is_empty() || self.details_tab == DetailsTab::Search {
@@ -500,8 +511,27 @@ impl DevHubLite {
             return;
         };
 
+        self.launch_error = open_project_in_zed(&project).err();
+        cx.notify();
+    }
+
+    fn open_selected_with_picker(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
         self.launch_error = if project.source.is_remote() {
-            open_remote_in_vscode(&project).err()
+            match zed_ssh_uri(&project) {
+                Ok(uri) => {
+                    open_uri_with_picker(&uri, window);
+                    None
+                }
+                Err(error) => Some(error),
+            }
         } else {
             open_with_picker(&project.path, window);
             None
@@ -521,6 +551,8 @@ impl DevHubLite {
             self.pending_scan_dirs = self.config.scan_dirs.clone();
             self.pending_remote_hosts = self.config.remote_hosts.clone();
             self.pending_max_depth = self.config.max_depth;
+            self.pending_theme = self.config.theme;
+            self.pending_appearance = self.config.appearance;
             self.source_picker = SourcePicker::Closed;
             window.focus(&self.focus_handle);
         }
@@ -595,13 +627,13 @@ impl DevHubLite {
                     }
                     index
                 } else {
-                        self.pending_remote_hosts.push(RemoteHostConfig {
-                            name: name.trim().to_string(),
-                            host,
-                            roots: Vec::new(),
-                            max_depth: self.pending_max_depth,
-                        });
-                        self.pending_remote_hosts.len() - 1
+                    self.pending_remote_hosts.push(RemoteHostConfig {
+                        name: name.trim().to_string(),
+                        host,
+                        roots: Vec::new(),
+                        max_depth: self.pending_max_depth,
+                    });
+                    self.pending_remote_hosts.len() - 1
                 };
                 self.remote_name_input.update(cx, |input, cx| {
                     input.set_value("", window, cx);
@@ -779,14 +811,38 @@ impl DevHubLite {
         }
     }
 
+    fn change_remote_depth(&mut self, host_index: usize, delta: isize, cx: &mut Context<Self>) {
+        if let Some(host) = self.pending_remote_hosts.get_mut(host_index) {
+            host.max_depth = host.max_depth.saturating_add_signed(delta).clamp(1, 20);
+            cx.notify();
+        }
+    }
+
+    fn cycle_theme(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let index = ThemeId::ALL
+            .iter()
+            .position(|theme| *theme == self.pending_theme)
+            .unwrap_or_default();
+        self.pending_theme = ThemeId::ALL[(index + 1) % ThemeId::ALL.len()];
+        cx.notify();
+    }
+
+    fn cycle_appearance(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let index = AppearanceMode::ALL
+            .iter()
+            .position(|appearance| *appearance == self.pending_appearance)
+            .unwrap_or_default();
+        self.pending_appearance = AppearanceMode::ALL[(index + 1) % AppearanceMode::ALL.len()];
+        cx.notify();
+    }
+
     fn save_settings(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         let mut config = self.config.clone();
         config.scan_dirs = self.pending_scan_dirs.clone();
         config.remote_hosts = self.pending_remote_hosts.clone();
         config.max_depth = self.pending_max_depth;
-        for host in &mut config.remote_hosts {
-            host.max_depth = self.pending_max_depth;
-        }
+        config.theme = self.pending_theme;
+        config.appearance = self.pending_appearance;
         config.normalize();
         match config.save() {
             Ok(()) => {
@@ -804,6 +860,8 @@ impl DevHubLite {
         self.pending_scan_dirs.clear();
         self.pending_remote_hosts.clear();
         self.pending_max_depth = 3;
+        self.pending_theme = self.config.theme;
+        self.pending_appearance = self.config.appearance;
         self.source_picker = SourcePicker::Closed;
         cx.notify();
     }
@@ -922,6 +980,49 @@ impl DevHubLite {
                                                 )),
                                         ),
                                 )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(10.0))
+                                        .text_color(theme.text_muted)
+                                        .child("scan depth")
+                                        .child(
+                                            div()
+                                                .id(("remote-depth-down", host_index))
+                                                .cursor_pointer()
+                                                .text_color(theme.accent)
+                                                .child("−")
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.change_remote_depth(
+                                                            host_index,
+                                                            -1,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                        .child(host.max_depth.to_string())
+                                        .child(
+                                            div()
+                                                .id(("remote-depth-up", host_index))
+                                                .cursor_pointer()
+                                                .text_color(theme.accent)
+                                                .child("+")
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.change_remote_depth(
+                                                            host_index,
+                                                            1,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        ),
+                                )
                                 .children(host.roots.iter().enumerate().map(
                                     |(root_index, root)| {
                                         div()
@@ -1016,7 +1117,50 @@ impl DevHubLite {
                             ),
                     )
                     .child(div().h(px(12.0)))
-                    .child(section_label("MAX SCAN DEPTH", theme))
+                    .child(section_label("APPEARANCE", theme))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("cycle-theme")
+                                    .px_2()
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(theme.border_strong)
+                                    .cursor_pointer()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.text)
+                                    .child(format!("Theme: {}", self.pending_theme.label()))
+                                    .on_click(cx.listener(Self::cycle_theme)),
+                            )
+                            .child(
+                                div()
+                                    .id("cycle-appearance")
+                                    .px_2()
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(theme.border_strong)
+                                    .cursor_pointer()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.text)
+                                    .child(format!(
+                                        "Mode: {}",
+                                        self.pending_appearance.label()
+                                    ))
+                                    .on_click(cx.listener(Self::cycle_appearance)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(theme.text_disabled)
+                            .child("Theme changes apply after Save && Rescan."),
+                    )
+                    .child(div().h(px(12.0)))
+                    .child(section_label("LOCAL SCAN DEPTH", theme))
                     .child(
                         div()
                             .flex()
@@ -1795,7 +1939,7 @@ impl DevHubLite {
             .child(div().flex_1())
             .child({
                 div()
-                    .id("open-project-from-tabs")
+                    .id("open-project-in-zed")
                     .h(px(23.0))
                     .px_2()
                     .flex()
@@ -1814,10 +1958,35 @@ impl DevHubLite {
                             .text_color(theme.text)
                     })
                     .active(move |style| style.bg(theme.surface_selected))
-                    .child("OPEN")
+                    .child("OPEN IN ZED")
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_selected_project(&OpenSelectedProject, window, cx);
                     }))
+            })
+            .child({
+                div()
+                    .id("open-project-with-picker")
+                    .h(px(23.0))
+                    .ml_1()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.surface_background)
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(move |style| {
+                        style
+                            .bg(theme.surface_hover)
+                            .border_color(theme.text_disabled)
+                            .text_color(theme.text)
+                    })
+                    .active(move |style| style.bg(theme.surface_selected))
+                    .child("OPEN IN…")
+                    .on_click(cx.listener(Self::open_selected_with_picker))
             });
 
         let content: gpui::AnyElement = match self.details_tab {
@@ -1847,15 +2016,19 @@ impl DevHubLite {
         let readme_style = TextViewStyle {
             paragraph_gap: rems(0.65),
             heading_base_font_size: px(15.0),
-            highlight_theme: HighlightTheme::default_dark(),
-            is_dark: true,
+            highlight_theme: if theme.is_light {
+                HighlightTheme::default_light()
+            } else {
+                HighlightTheme::default_dark()
+            },
+            is_dark: !theme.is_light,
             ..Default::default()
         };
 
         let readme: AnyElement = match &self.readme_state {
             LoadState::Loaded(document) => {
                 let source = if self.readme_preview {
-                    sanitize_markdown_images(document)
+                    omit_markdown_images(document)
                 } else {
                     markdown_raw_source(document)
                 };
@@ -1875,6 +2048,17 @@ impl DevHubLite {
                 workbench_message("no README found", theme.text_disabled)
             }
         };
+        let host = project.source.host().unwrap_or("local").to_string();
+        let remote = project.git_remote.clone().unwrap_or_else(|| "none".into());
+        let markers = if project.markers_found.is_empty() {
+            "none".to_string()
+        } else {
+            project.markers_found.join(", ")
+        };
+        let modified = project
+            .last_modified
+            .map(relative_modified)
+            .unwrap_or_else(|| "unknown".into());
 
         div()
             .id("overview-panel")
@@ -1884,7 +2068,7 @@ impl DevHubLite {
             .flex_col()
             .child(
                 div()
-                    .h(px(88.0))
+                    .h(px(124.0))
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
@@ -1956,6 +2140,17 @@ impl DevHubLite {
                                 project.path.to_string_lossy().into_owned(),
                                 theme,
                             )),
+                    )
+                    .child(
+                        div()
+                            .h(px(42.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .gap_2()
+                            .child(info_card("HOST", host, theme))
+                            .child(info_card("REMOTE", remote, theme))
+                            .child(info_card("MARKERS", markers, theme))
+                            .child(info_card("MODIFIED", modified, theme)),
                     ),
             )
             .child(div().min_h_0().flex_1().child(readme))
@@ -1996,109 +2191,120 @@ impl DevHubLite {
             (false, warnings) => format!("{warnings} warning(s)"),
         };
 
-        let tree_panel = div()
-            .id("tree-panel")
-            .w(px(self.tree_width_px))
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(24.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .gap_1()
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(if show_hidden {
+        let tree_panel =
+            div()
+                .id("tree-panel")
+                .w(px(self.tree_width_px))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .gap_1()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(if show_hidden {
+                                    theme.text
+                                } else {
+                                    theme.text_disabled
+                                })
+                                .child(if show_hidden { "\u{2611}" } else { "\u{2610}" }),
+                        )
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.0))
+                                .text_color(theme.text_disabled)
+                                .child("show hidden"),
+                        )
+                        .child(
+                            div()
+                                .ml_auto()
+                                .font_family(MONO_FONT)
+                                .text_size(px(9.0))
+                                .text_color(theme.warning)
+                                .child(tree_notice),
+                        )
+                        .id("hidden-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(Self::toggle_hidden)),
+                )
+                .child(
+                    div()
+                        .id("files-scroll")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .children(visible.iter().map(|&idx| {
+                            let entry = &listing.entries[idx];
+                            let indent = 6.0 + entry.depth as f32 * 14.0;
+                            let is_selected = self.selected_file.as_ref() == Some(&entry.path);
+                            let is_dir = entry.is_dir;
+                            let is_expanded = is_dir && self.expanded_dirs.contains(&entry.path);
+                            let name = entry.name.clone();
+                            let disclosure = if is_expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            };
+                            let row_bg = if is_selected {
+                                theme.surface_selected
+                            } else {
+                                theme.panel_background
+                            };
+                            let text_col = if is_selected {
                                 theme.text
                             } else {
-                                theme.text_disabled
-                            })
-                            .child(if show_hidden { "\u{2611}" } else { "\u{2610}" }),
-                    )
-                    .child(
-                        div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.0))
-                            .text_color(theme.text_disabled)
-                            .child("show hidden"),
-                    )
-                    .child(
-                        div()
-                            .ml_auto()
-                            .font_family(MONO_FONT)
-                            .text_size(px(9.0))
-                            .text_color(theme.warning)
-                            .child(tree_notice),
-                    )
-                    .id("hidden-toggle")
-                    .cursor_pointer()
-                    .on_click(cx.listener(Self::toggle_hidden)),
-            )
-            .child(
-                div()
-                    .id("files-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .children(visible.iter().map(|&idx| {
-                        let entry = &listing.entries[idx];
-                        let indent = 6.0 + entry.depth as f32 * 14.0;
-                        let is_selected = self.selected_file.as_ref() == Some(&entry.path);
-                        let is_dir = entry.is_dir;
-                        let is_expanded = is_dir && self.expanded_dirs.contains(&entry.path);
-                        let name = entry.name.clone();
-                        let glyph = if is_dir {
-                            if is_expanded {
-                                "\u{25be} "
-                            } else {
-                                "\u{25b8} "
-                            }
-                        } else {
-                            file_icon(&name)
-                        };
-                        let row_bg = if is_selected {
-                            theme.surface_selected
-                        } else {
-                            theme.panel_background
-                        };
-                        let text_col = if is_selected {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        };
+                                theme.text_muted
+                            };
 
-                        div()
-                            .id(("ft", idx))
-                            .h(px(22.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .pl(px(indent))
-                            .gap_1()
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.0))
-                            .bg(row_bg)
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(theme.surface_hover))
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(if is_dir { theme.text } else { text_col })
-                                    .child(glyph),
-                            )
-                            .child(div().text_color(text_col).child(name))
-                            .on_click(cx.listener(move |this, event, window, cx| {
-                                this.toggle_tree_entry(idx, event, window, cx);
-                            }))
-                    })),
-            );
+                            div()
+                                .id(("ft", idx))
+                                .h(px(22.0))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .pl(px(indent))
+                                .gap_1()
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.0))
+                                .bg(row_bg)
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(theme.surface_hover))
+                                .child(div().w(px(14.0)).flex_shrink_0().child(if is_dir {
+                                    Icon::new(disclosure)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted)
+                                } else {
+                                    Icon::empty().size(px(13.0))
+                                }))
+                                .child(
+                                    Icon::new(if is_dir {
+                                        if is_expanded {
+                                            IconName::FolderOpen
+                                        } else {
+                                            IconName::FolderClosed
+                                        }
+                                    } else {
+                                        file_icon(&name)
+                                    })
+                                    .size(px(14.0))
+                                    .text_color(if is_dir { theme.accent } else { text_col }),
+                                )
+                                .child(div().text_color(text_col).child(name))
+                                .on_click(cx.listener(move |this, event, window, cx| {
+                                    this.toggle_tree_entry(idx, event, window, cx);
+                                }))
+                        })),
+                );
 
         let handle = div()
             .id("split-handle")
@@ -2425,7 +2631,24 @@ impl Focusable for DevHubLite {
 
 impl Render for DevHubLite {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let theme = Theme::for_preferences(
+            self.config.theme,
+            self.config.appearance,
+            window.appearance(),
+        );
+        if gpui_component::Theme::global(cx).is_dark() == theme.is_light {
+            let mode = if theme.is_light {
+                gpui_component::ThemeMode::Light
+            } else {
+                gpui_component::ThemeMode::Dark
+            };
+            gpui_component::Theme::change(mode, None, cx);
+            let component_theme = gpui_component::Theme::global_mut(cx);
+            component_theme.radius = px(1.0);
+            component_theme.radius_lg = px(1.0);
+            component_theme.font_family = UI_FONT.into();
+            component_theme.mono_font_family = MONO_FONT.into();
+        }
         let window_active = window.is_window_active();
         let window_maximized = window.is_maximized();
         let project_list_focused = self.focus_handle.is_focused(window);
@@ -2586,6 +2809,7 @@ impl Render for DevHubLite {
             .border_color(theme.border)
             .bg(theme.app_background)
             .font_family(UI_FONT)
+            .font_weight(FontWeight::MEDIUM)
             .text_size(px(13.0))
             .text_color(theme.text)
             .child(
@@ -2610,16 +2834,12 @@ impl Render for DevHubLite {
                             .window_control_area(WindowControlArea::Drag)
                             .on_mouse_down(MouseButton::Left, |event, window, _| {
                                 if event.click_count == 2 {
-                                    window.zoom_window();
+                                    toggle_window_zoom(window);
                                 } else {
                                     begin_window_drag(window);
                                 }
                             })
-                            .child(div().size(px(6.0)).rounded_full().bg(if window_active {
-                                theme.accent
-                            } else {
-                                theme.text_disabled
-                            }))
+                            .child(img("appicon.png").size(px(18.0)))
                             .child(
                                 div()
                                     .text_size(px(12.0))
@@ -2842,7 +3062,7 @@ impl Render for DevHubLite {
                             .gap_3()
                             .font_family(MONO_FONT)
                             .text_color(theme.text_disabled)
-                            .child("type filter  ·  ↑↓ select  ·  Enter open  ·  Ctrl+R scan")
+                            .child("type filter  ·  ↑↓ select  ·  Enter Zed  ·  Ctrl+R scan")
                             .child(
                                 div()
                                     .max_w(px(200.0))
@@ -2889,6 +3109,20 @@ fn markdown_raw_source(source: &str) -> String {
     markdown_fenced_source("text", source)
 }
 
+fn relative_modified(timestamp: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(timestamp);
+    let elapsed = now.saturating_sub(timestamp);
+    match elapsed {
+        0..=59 => "just now".into(),
+        60..=3_599 => format!("{}m ago", elapsed / 60),
+        3_600..=86_399 => format!("{}h ago", elapsed / 3_600),
+        _ => format!("{}d ago", elapsed / 86_400),
+    }
+}
+
 fn remote_parent_path(path: &str) -> Option<String> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -2915,7 +3149,7 @@ fn fixture_project(name: &str, path: &str, project_type: ProjectType, marker: &s
 }
 
 pub(crate) fn run() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let component_theme = gpui_component::Theme::global_mut(cx);

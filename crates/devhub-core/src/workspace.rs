@@ -107,8 +107,6 @@ pub fn search_project_content(project: &Project, query: &str) -> Result<Vec<Sear
     }
 }
 
-/// Hidden paths are optional, but gitignore rules and generated-directory
-/// pruning always remain active.
 pub fn list_tree(root: &Path, max_depth: usize, show_hidden: bool) -> Result<TreeListing, String> {
     let metadata =
         std::fs::metadata(root).map_err(|error| format!("{}: {error}", root.display()))?;

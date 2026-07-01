@@ -2,8 +2,10 @@ use devhub_core::ProjectType;
 use devhub_gpui::{ScanState, Theme, MONO_FONT};
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::IconName;
 
 use crate::app::WindowCommand;
+use crate::platform::toggle_window_zoom;
 
 pub(crate) fn window_control(
     id: &'static str,
@@ -51,7 +53,7 @@ pub(crate) fn window_control(
         .child(glyph)
         .on_click(move |_, window, _| match command {
             WindowCommand::Minimize => window.minimize_window(),
-            WindowCommand::Maximize => window.zoom_window(),
+            WindowCommand::Maximize => toggle_window_zoom(window),
             WindowCommand::Close => window.remove_window(),
         })
 }
@@ -100,6 +102,7 @@ pub(crate) fn workbench_message(message: impl Into<SharedString>, color: Hsla) -
 pub(crate) fn section_label(label: &'static str, theme: Theme) -> Div {
     div()
         .font_family(MONO_FONT)
+        .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(10.0))
         .text_color(theme.text_disabled)
         .child(label)
@@ -136,20 +139,16 @@ pub(crate) fn project_type_color(theme: Theme, project_type: ProjectType) -> Hsl
     }
 }
 
-pub(crate) fn file_icon(name: &str) -> &'static str {
+pub(crate) fn file_icon(name: &str) -> IconName {
     if let Some(dot) = name.rfind('.') {
         match &name[dot + 1..] {
-            "rs" => "\u{25C8} ",
-            "js" | "ts" | "jsx" | "tsx" => "\u{25C6} ",
-            "py" | "rb" | "php" | "sh" | "bash" => "\u{25C6} ",
-            "toml" | "json" | "yaml" | "yml" | "ini" | "conf" => "\u{25C7} ",
-            "md" | "txt" | "rst" => "\u{00B7} ",
-            "html" | "css" | "scss" | "less" | "sass" => "\u{25CE} ",
-            "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" => "\u{25CB} ",
-            "exe" | "dll" | "wasm" | "pdb" => "\u{2022} ",
-            _ => "\u{00B7} ",
+            "md" | "txt" | "rst" => IconName::BookOpen,
+            "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" => IconName::GalleryVerticalEnd,
+            "sh" | "bash" | "ps1" | "bat" | "cmd" => IconName::SquareTerminal,
+            "toml" | "json" | "yaml" | "yml" | "ini" | "conf" => IconName::Settings2,
+            _ => IconName::File,
         }
     } else {
-        "\u{00B7} "
+        IconName::File
     }
 }
