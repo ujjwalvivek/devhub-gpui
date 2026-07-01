@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 const MARKERS: &[(&str, ProjectType)] = &[
     ("Cargo.toml", ProjectType::Rust),
     ("package.json", ProjectType::Node),
@@ -14,9 +16,23 @@ const MARKERS: &[(&str, ProjectType)] = &[
     ("*.sln", ProjectType::DotNet),
     ("build.gradle", ProjectType::Java),
     ("pom.xml", ProjectType::Java),
+    (".git", ProjectType::Unknown),
+    ("*.html", ProjectType::Unknown),
+    ("*.js", ProjectType::Unknown),
+    ("*.css", ProjectType::Unknown),
+    ("*.ts", ProjectType::Unknown),
+    ("*.tsx", ProjectType::Unknown),
+    ("*.jsx", ProjectType::Unknown),
+    ("*.py", ProjectType::Unknown),
+    ("*.rb", ProjectType::Unknown),
+    ("*.php", ProjectType::Unknown),
+    ("*.swift", ProjectType::Unknown),
+    ("*.kt", ProjectType::Unknown),
+    ("*.dart", ProjectType::Unknown),
+    ("*.vue", ProjectType::Unknown),
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProjectType {
     Rust,
     Node,
@@ -47,7 +63,7 @@ impl ProjectType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectSource {
     #[default]
     Local,
@@ -83,7 +99,7 @@ impl ProjectSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
@@ -353,7 +369,7 @@ mod tests {
         assert_eq!(projects.len(), 1);
         let project = &projects[0];
         assert_eq!(project.project_type, ProjectType::Rust);
-        assert_eq!(project.markers_found, ["Cargo.toml"]);
+        assert_eq!(project.markers_found, ["Cargo.toml", ".git"]);
         assert!(project.has_git);
         assert_eq!(
             project.git_remote.as_deref(),
@@ -399,5 +415,59 @@ mod tests {
         ));
 
         assert!(scan_directories(&[missing], 2).is_empty());
+    }
+
+    #[test]
+    fn detects_project_with_only_git_directory() {
+        let root = TestDir::new("only-git");
+        let project_dir = root.create_dir("my-web-app");
+        fs::create_dir_all(project_dir.join(".git")).expect("create .git");
+        root.write(
+            "my-web-app/.git/config",
+            "[remote \"origin\"]\n    url = https://example.com/web-app.git\n",
+        );
+
+        let projects = scan_directories(std::slice::from_ref(&root.path), 3);
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "my-web-app");
+        assert_eq!(projects[0].project_type, ProjectType::Unknown);
+        assert!(projects[0].has_git);
+        assert!(projects[0].markers_found.contains(&".git".to_string()));
+        assert_eq!(
+            projects[0].git_remote.as_deref(),
+            Some("https://example.com/web-app.git")
+        );
+    }
+
+    #[test]
+    fn detects_project_with_only_code_file_extensions() {
+        let root = TestDir::new("code-files");
+        let project_dir = root.create_dir("my-site");
+        fs::write(project_dir.join("index.html"), "<html></html>").expect("write index.html");
+        fs::write(project_dir.join("style.css"), "body {}").expect("write style.css");
+
+        let projects = scan_directories(std::slice::from_ref(&root.path), 3);
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "my-site");
+        assert_eq!(projects[0].project_type, ProjectType::Unknown);
+        assert!(!projects[0].has_git);
+        assert!(projects[0].markers_found.contains(&"*.html".to_string()));
+        assert!(projects[0].markers_found.contains(&"*.css".to_string()));
+    }
+
+    #[test]
+    fn detects_project_with_only_python_files() {
+        let root = TestDir::new("python-files");
+        let project_dir = root.create_dir("pyscript");
+        fs::write(project_dir.join("main.py"), "print('hello')").expect("write main.py");
+
+        let projects = scan_directories(std::slice::from_ref(&root.path), 3);
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "pyscript");
+        assert_eq!(projects[0].project_type, ProjectType::Unknown);
+        assert!(projects[0].markers_found.contains(&"*.py".to_string()));
     }
 }

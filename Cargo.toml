@@ -6,6 +6,10 @@ resolver = "2"
 [workspace.dependencies]
 devhub-core = { path = "crates/devhub-core" }
 gpui = "0.2.2"
+gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
 ignore = "0.4"
 raw-window-handle = "0.6"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "6"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
