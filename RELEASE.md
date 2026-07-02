@@ -47,7 +47,8 @@ The first launch opens source settings. Add at least one local folder or SSH sou
 
 ## Project parity
 
-v1.1.0 completes the DevHub parity project. All core capabilities are ported:
+v1.1.0 completes the approved DevHub functional-parity project. The selected
+product workflow is complete:
 scan cancellation with a "Stop" button, remote `.gitignore` semantics via
 `git check-ignore`, pin/unpin and hide/archive projects with persistent config,
 right-click context menus, themed input fields, and Windows SSH without console
@@ -57,7 +58,11 @@ window flash.
 
 Local projects open through the `zed` command. Remote projects use Zed's `ssh://user@host/path` target format.
 
-SSH access must already work non-interactively through OpenSSH configuration, keys, or an agent. Remote project discovery requires `sh` and GNU-compatible `find`, `grep`, `stat`, `wc`, `head`, and `cat`. A PowerShell-only Windows SSH session is not compatible with the current remote discovery implementation.
+SSH access must already work non-interactively through OpenSSH configuration,
+keys, or an agent. Remote project discovery requires `sh` and GNU-compatible
+`find`, `grep`, `stat`, `wc`, `head`, and `cat`. Git is required on the remote
+for Git metadata and ignore-rule parity. A PowerShell-only Windows SSH session
+is not compatible with the current remote discovery implementation.
 
 ## Verify downloads
 

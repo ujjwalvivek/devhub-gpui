@@ -11,18 +11,21 @@
 
 `projects.toml`: %AppData%\Local\devhub-gpui\cache\projects.toml
 
-## Remaining differences
+## Optional future enhancements and platform limits
+
+These are not unfinished parity work. They are possible post-v1.1.0 product
+investments or explicit platform boundaries.
 
 | Capability                              | Complexity | Notes                                                                                                                                                      |
 | --------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Per-source scan status and errors       | Low        | ScanModel already tracks aggregate state; per-source tracking needs per-root error/result fields and UI per-project-row indicators                         |
 | Manual refresh per root or host         | Medium     | Requires source-level refresh button and per-source cancellation routing; the cancellation infrastructure now exists                                       |
 | Global full-text search index (`grep`)  | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query — a significant standalone feature                                    |
-| SSH requires a POSIX/GNU remote         | N/A        | Hard platform limitation: remote scripts depend on `sh`, `find`, `grep`, `stat`, `wc`, `head`, `cat`. SFTP and PowerShell-only servers remain unsupported. |
+| SSH requires a POSIX/GNU remote         | N/A        | Hard platform limitation: remote scripts depend on `sh`, `find`, `grep`, `stat`, `wc`, `head`, `cat`; Git provides metadata and ignore parity. SFTP and PowerShell-only servers remain unsupported. |
 
 ## Status
 
-- Current stage: DevHub-GPUI parity complete. All core DevHub capabilities ported:
+- Current stage: DevHub-GPUI v1.1.0 complete within the approved functional-parity scope:
   - Local + SSH discovery, tree, read, README, search
   - Cancellation of all in-flight operations (scan, tree, file, readme, search)
   - Remote `.gitignore` semantics via `git check-ignore` over SSH
@@ -30,7 +33,10 @@
   - Right-click context menu with Pin/Hide actions
   - Zed-first launch (local `zed <path>` and SSH `ssh://user@host/path`)
   - Custom local/SSH source picker, versioned config/cache, standalone release automation
-- Next gate: project closing. Website update deferred.
+- Closure gate passed on 2026-07-03: local static validation is green, the
+  cross-platform v1.1.0 release and checksums are published, and the updated
+  website presents GPUI as the primary DevHub with the egui build retained as
+  the legacy reference.
 - Implementation started: semantic dark theme and compact application shell
 - Workspace observed on 2026-06-30: minimal generated-and-reviewed Cargo workspace
 - Renamed-workspace audit on 2026-07-01: stale `[REDACTED]\gpui` paths in this plan
@@ -1482,7 +1488,7 @@ The later visual journey is successful when all of the following are true:
 | 2026-07-02 | Make DevHub a Zed-first project hub                                          | Both local paths and documented Zed SSH URLs open through `zed`; the native application chooser remains a secondary best-effort path rather than maintaining editor profiles.                                                                                    |
 | 2026-07-02 | Persist legacy theme and appearance choices                                  | Five DevHub palettes and System/Dark/Light modes are small serializable preferences; Monochrome Dark remains the migration-safe default for existing visual direction.                                                                                           |
 | 2026-07-02 | Keep independent SSH scan depth                                              | `RemoteHostConfig.max_depth` is now edited per host and is no longer overwritten by the local/global depth on save.                                                                                                                                              |
-| 2026-07-02 | Defer source toggles, FTUE, and Explorer opening                             | A single-host workflow does not justify temporary-disable state or another onboarding layer; Explorer cannot represent SSH paths without an external filesystem mapping.                                                                                         |
+| 2026-07-02 | Defer source toggles, FTUE, and Explorer opening                             | Historical decision, partially superseded: a minimal first-run settings flow was later implemented. The remaining choices stayed outside the approved product scope.                                                                                              |
 | 2026-07-02 | Ship v1.0.0 as the first standalone tagged release                           | Cross-platform Windows/Linux/macOS archives and SHA-256 checksums attached to the GitHub release; release workflow verified via `github-actions[bot]`; user confirmed native Windows validation of the shipped binary.                                           |
 | 2026-07-02 | Coexistence over cutover                                                     | The egui `devhub` and GPUI `devhub-gpui` coexist as separate products. No identity rename, no config migration, no archival of `devhub`. Internal names stay as-is. The website will present GPUI as the primary "DevHub" and egui as a "Legacy" download.       |
 | 2026-07-02 | Grant a writable exception for `[REDACTED]\devhub\web`                       | The Astro marketing site lives in the read-only egui repo. Website updates require editing it in place. The exception is scoped to `web/` only; egui Rust source remains read-only.                                                                              |
@@ -1497,7 +1503,8 @@ The later visual journey is successful when all of the following are true:
 | 2026-07-03 | Add right-click context menu with backdrop and bounds clamping               | Right-click any project row opens an absolutely-positioned menu (Pin/Hide). Backdrop click-outside closes. Position clamped to window bounds to prevent overflow.                                                                                                |
 | 2026-07-03 | Theme filter and SSH/path inputs with `appearance(false)` and bg/border      | Filter input goes edge-to-edge with `.appearance(false)`. Remote name, host, and path inputs get `bg(surface_background)` + `border_color` + 24px height consistency.                                                                                            |
 | 2026-07-03 | Remove hardcoded metadata header height `h(124px)`                           | The fixed height caused a divider overlap with the component README pane. Header now sizes to its content.                                                                                                                                                       |
-| 2026-07-03 | Bump version to v1.1.0; close the parity project                             | All core DevHub capabilities ported. Remaining differences documented with complexity estimates. Website update deferred.                                                                                                                                        |
+| 2026-07-03 | Bump version to v1.1.0; close the parity project                             | Approved functional parity completed. Optional enhancements documented with complexity estimates. The temporary website deferral was superseded by the public-surface closure recorded below.                                                                    |
+| 2026-07-03 | Close the public project surface                                             | The v1.1.0 archives and checksums are published; the live site presents GPUI as primary and the archived egui implementation as legacy. Future work is optional product investment, not unfinished parity.                                                          |
 
 Versions to record during Phase 1:
 
@@ -1516,9 +1523,9 @@ Versions to record during Phase 1:
 | `crates/devhub-core/src/discovery.rs`                   | `[REDACTED]\devhub\src\discovery\scanner.rs` local subset       | Removed egui/serde/tracing/anyhow/SSH/status coupling; Rust 2021 conditions; suppressed synthetic parent after child discovery; added `Serialize`/`Deserialize` derives for cache round-trip | Four isolated filesystem tests                                  |
 | `crates/devhub-core/src/config.rs`                      | `[REDACTED]\devhub\src\config.rs`                               | Distinct `"devhub-gpui"` identity; retained only local/SSH source fields; normalized and merged remote hosts without migrating legacy data                                                   | Six config tests                                                |
 | `crates/devhub-core/src/cache.rs`                       | `[REDACTED]\devhub\src\cache.rs`                                | Start at version 1 (distinct from egui v4); `Option`-returning API; no `anyhow` dependency                                                                                                   | Two cache tests (round-trip, wrong-version rejection)           |
-| `crates/devhub-gpui/src/main.rs` fixture construction   | Previous local UI-only fixture struct                           | Uses shared `Project`, `ProjectSource`, and `ProjectType`; loads config/cache on startup; scans configured roots                                                                             | Covered by workspace compile/clippy; visual structure unchanged |
+| `crates/devhub-gpui/src/app.rs` startup and scan flow   | Previous local UI-only fixture struct                           | Uses shared `Project`, `ProjectSource`, and `ProjectType`; production fixtures were removed; startup loads versioned config/cache and scans only explicit roots                              | Startup and scan-state tests plus workspace compile/clippy      |
 | `crates/devhub-gpui/src/platform.rs` (open_with_picker) | Windows `SHOpenWithDialog` API                                  | Isolated in platform.rs; runs on background thread; HWND passed as isize for Send safety                                                                                                     | Covered by workspace compile/clippy                             |
-| `crates/devhub-core/src/remote.rs`                      | `[REDACTED]\devhub\src\workspace.rs` and `discovery/scanner.rs` | Rebuilt around validated targets, hard deadlines, bounded output, hierarchy preservation, partial scan errors, strict UTF-8/binary handling, and no `anyhow`                                 | Five parser, validation, quoting, and hierarchy tests           |
+| `crates/devhub-core/src/remote.rs`                      | `[REDACTED]\devhub\src\workspace.rs` and `discovery/scanner.rs` | Rebuilt around validated targets, cancellation, hard deadlines, bounded output, hierarchy preservation, remote ignore rules, partial scan errors, strict UTF-8/binary handling, and no `anyhow` | Parser, validation, quoting, hierarchy, cancellation, and ignore tests |
 | `crates/devhub-gpui/src/app.rs` source picker           | `[REDACTED]\devhub\src\app.rs` picker behavior                  | Reimplemented in GPUI as one custom local-drive and SSH-directory browser; removed the Windows COM folder picker                                                                             | Covered by core picker-operation tests and workspace compile    |
 
 ## Functional parity matrix
@@ -1576,7 +1583,8 @@ Versions to record during Phase 1:
 - Remote ignore files are now interpreted over SSH via `REMOTE_IGNORE_FUNCTION`
   (`git check-ignore` parent-directory walk). The local `ignore` crate and
   remote shell function may diverge in edge cases.
-- A "Stop" button in the titlebar cancels all in-flight SSH and scan operations.
+- A "Stop" button in the titlebar cancels all tracked scan, source-picker,
+  tree, file, README, and search operations.
   Individual per-operation cancellation (e.g. stop tree but not scan) is not
   implemented.
 - Zed must be installed and its `zed` command available, or installed in a known
@@ -1590,16 +1598,16 @@ Versions to record during Phase 1:
   linked-image destinations remain clickable. Offline local/SSH asset loading is
   not implemented.
 
-## Next action
+## Closure
 
-This session closes the DevHub-GPUI parity project. All remaining differences
-are documented in the complexity table above and deferred as deliberate
-product decisions.
+The DevHub-GPUI parity project closed on 2026-07-03. The approved product
+workflow is implemented, the full local validation gate passes with 60 tests,
+native Windows behavior has been user-verified, and v1.1.0 is published with
+Windows, Linux, and macOS archives plus SHA-256 checksums. The live website
+presents GPUI as the primary DevHub and keeps the egui implementation as the
+legacy reference.
 
-The v1.1.0 release is complete; SHA-256 checksums and cross-platform archives
-are published. The website update (`[REDACTED]\devhub\web`) is deferred — it
-is a marketing concern rather than a parity gap and does not block the project
-handoff.
-
-To resume work, pick from the deferred capabilities table above. Each item
-includes a complexity estimate and implementation notes.
+This ADR is now the historical engineering record rather than an active task
+queue. The table at the beginning contains optional enhancements and platform
+limits; none blocks closure. If development resumes, record a new dated decision
+and validation baseline instead of silently reopening a completed phase.

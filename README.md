@@ -7,7 +7,10 @@
   <img src="https://echopoint.ujjwalvivek.com/svg/badges/release?repo=devhub-gpui&logo=github&bg=111111&badgeColor=2b2b2b&textColor=e8e8e8&border=555555&borderWidth=2&rx=0&px=6&py=4" height="24" alt="releases">
 </p>
 
-An independent GPUI-based successor experiment for DevHub. The existing egui application remains the behavioral reference; this workspace does not modify it.
+A compact, Zed-first project hub built with GPUI. It began as an independent
+successor experiment for the original egui DevHub and reached its approved
+functional-parity scope in v1.1.0. The archived egui application remains the
+historical behavioral reference.
 
 ## Current capabilities
 
@@ -24,6 +27,12 @@ An independent GPUI-based successor experiment for DevHub. The existing egui app
 - Version configuration independently from the cache: legacy unversioned files migrate atomically to schema version 1, while newer schemas are never overwritten by an older build.
 - Configure separate local and per-SSH-host scan depths.
 - Display project source, host, Git remote, markers, and last-modified metadata.
+- Cancel active scans, source-picker requests, tree loads, file/README reads,
+  and searches without allowing stale results to replace current state.
+- Honor remote repository ignore rules through `git check-ignore` when Git is
+  available on the SSH host.
+- Pin important projects, hide archived projects, and manage both states through
+  persistent configuration and project context menus.
 - Select the five legacy DevHub palettes in System, Dark, or Light appearance.
 - Render a compact client-drawn Windows shell inspired by Zed's visual principles.
 
@@ -35,7 +44,8 @@ The document viewer is intentionally read-only. It uses `gpui-component`'s rope-
 - Visual Studio C++ build tools and a Windows 10/11 SDK
 - `fxc.exe` from the Windows SDK for GPUI 0.2.2 shader compilation
 - Windows OpenSSH (`ssh.exe`) and key/config-based non-interactive authentication for SSH sources
-- A POSIX `sh` remote environment with GNU-compatible `find`, `grep`, `stat`, `wc`, and `head`
+- A POSIX `sh` remote environment with GNU-compatible `find`, `grep`, `stat`,
+  `wc`, `head`, and `cat`; remote Git is required for Git metadata and ignore-rule parity
 - Zed with its `zed` CLI available to open projects directly. Remote projects use Zed's supported `ssh://user@host/path` target format.
 
 If GPUI cannot locate `fxc.exe`, set it for the active PowerShell session:
