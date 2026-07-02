@@ -48,7 +48,6 @@ impl ScanModel {
 
     pub fn begin(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
-        self.projects.clear();
         self.state = ScanState::Scanning;
         self.generation
     }
@@ -69,7 +68,6 @@ impl ScanModel {
                 self.state = ScanState::Loaded { count };
             }
             Err(error) => {
-                self.projects.clear();
                 self.state = ScanState::Error(error);
             }
         }
@@ -105,7 +103,7 @@ mod tests {
 
         assert!(!scan.apply_result(stale_generation, Ok(vec![project()])));
         assert_eq!(scan.state, ScanState::Scanning);
-        assert!(scan.projects.is_empty());
+        assert_eq!(scan.projects.len(), 1);
 
         assert!(scan.apply_result(current_generation, Ok(vec![project()])));
         assert_eq!(scan.state, ScanState::Loaded { count: 1 });
@@ -124,9 +122,11 @@ mod tests {
         assert_eq!(scan.state, ScanState::Empty);
         assert!(scan.projects.is_empty());
 
+        let mut scan = ScanModel::new(vec![project()]);
+        let generation = scan.begin();
         assert!(scan.apply_result(generation, Err("fixture failure".to_string())));
         assert_eq!(scan.state, ScanState::Error("fixture failure".to_string()));
-        assert!(scan.projects.is_empty());
+        assert_eq!(scan.projects.len(), 1);
     }
 
     #[test]

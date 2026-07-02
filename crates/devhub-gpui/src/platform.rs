@@ -130,12 +130,22 @@ fn open_with_target(target: std::ffi::OsString, window: &Window) {
     });
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 pub(crate) fn open_with_picker(path: &Path, _window: &Window) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 pub(crate) fn open_uri_with_picker(uri: &str, _window: &Window) {
     let _ = std::process::Command::new("xdg-open").arg(uri).spawn();
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_with_picker(path: &Path, _window: &Window) {
+    let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_uri_with_picker(uri: &str, _window: &Window) {
+    let _ = std::process::Command::new("open").arg(uri).spawn();
 }

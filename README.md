@@ -9,10 +9,12 @@ application remains the behavioral reference; this workspace does not modify it.
 - Add local and SSH roots through one custom source picker.
 - Open source settings automatically on a true first launch; production startup
   never injects fixture projects.
-- Open source settings automatically on a true first launch; production startup
-  never injects fixture projects.
 - Filter and select projects; open local or SSH projects directly in Zed, with
   Windows "Open with" as a best-effort fallback.
+- Use the IME-capable project filter with Ctrl+F and virtualized project rows for
+  large cached collections.
+- Use the IME-capable project filter with Ctrl+F and virtualized project rows for
+  large cached collections.
 - Browse bounded local and remote project trees.
 - Read bounded UTF-8 text files with line numbers, selection/copy, wrapping,
   language-aware highlighting, and search-hit positioning.
@@ -21,6 +23,9 @@ application remains the behavioral reference; this workspace does not modify it.
 - Search local or remote project content in the background.
 - Persist configuration and the project cache under the distinct
   `devhub-gpui` platform identity.
+- Version configuration independently from the cache: legacy unversioned files
+  migrate atomically to schema version 1, while newer schemas are never
+  overwritten by an older build.
 - Configure separate local and per-SSH-host scan depths.
 - Display project source, host, Git remote, markers, and last-modified metadata.
 - Select the five legacy DevHub palettes in System, Dark, or Light appearance.
@@ -52,6 +57,9 @@ $env:GPUI_FXC_PATH='C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\
 
 Keep this machine-specific path out of committed Cargo configuration.
 
+For an isolated clean-install test that cannot touch normal application data,
+set an absolute `DEVHUB_GPUI_STATE_DIR` before starting the app.
+
 ## Run
 
 ```powershell
@@ -61,10 +69,11 @@ cargo run --release -p devhub-gpui
 Scanning and other filesystem access occur only after an explicit user action.
 Scan requires at least one configured local or SSH source; it never falls back
 to scanning the process working directory.
-Scan requires at least one configured local or SSH source; it never falls back
-to scanning the process working directory.
 Configuration is written under the platform configuration directory using the
 `devhub-gpui` identity, so it cannot overwrite the egui DevHub configuration.
+Configuration files carry schema `version = 1`. Existing unversioned files are
+migrated on load using the same crash-safe replacement path as normal saves.
+Files from a future schema version are rejected and left unchanged.
 SSH uses `BatchMode=yes`, the user's existing OpenSSH configuration and keys,
 strict host-key behavior from OpenSSH, connection deadlines, and bounded output.
 README images are never fetched. Preview mode shows their alt text as an offline
@@ -79,3 +88,19 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release --workspace --locked
 ```
+
+## Releases
+
+Release builds use the GUI subsystem on Windows, so launching
+`devhub-gpui.exe` does not create a console window. Debug builds retain a console
+for diagnostics.
+
+The GitHub Actions workflow builds and tests these standalone archives:
+
+- Windows x64 (`x86_64-pc-windows-msvc`)
+- Linux x64 (`x86_64-unknown-linux-gnu`)
+- macOS Apple Silicon (`aarch64-apple-darwin`)
+
+Push a tag matching the Cargo package version, such as `v0.1.0`, to create a
+GitHub release with all archives and SHA-256 checksums. Branch pushes, pull
+requests, and manual runs build the same matrix without publishing a release.

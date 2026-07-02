@@ -1,12 +1,43 @@
 mod scan;
 mod theme;
 
+use std::path::PathBuf;
+
+use devhub_core::Project;
+
 pub fn should_show_ftue(config_exists: bool, cache_exists: bool) -> bool {
     !config_exists && !cache_exists
 }
 
 pub fn has_scan_sources(local_roots: usize, remote_hosts: usize) -> bool {
     local_roots > 0 || remote_hosts > 0
+}
+
+pub fn filtered_project_indices(projects: &[Project], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..projects.len()).collect();
+    }
+
+    projects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, project)| project.search_key.contains(query).then_some(index))
+        .collect()
+}
+
+pub fn partition_local_scan_roots(roots: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
+    let mut available = Vec::with_capacity(roots.len());
+    let mut errors = Vec::new();
+
+    for root in roots {
+        match std::fs::metadata(&root) {
+            Ok(metadata) if metadata.is_dir() => available.push(root),
+            Ok(_) => errors.push(format!("Scan root is not a directory: {}", root.display())),
+            Err(error) => errors.push(format!("Cannot scan {}: {error}", root.display())),
+        }
+    }
+
+    (available, errors)
 }
 
 mod text_support {
@@ -217,7 +248,12 @@ pub use theme::{Theme, MONO_FONT, UI_FONT};
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{has_scan_sources, should_show_ftue};
+    use super::{
+        filtered_project_indices, has_scan_sources, partition_local_scan_roots, should_show_ftue,
+    };
+    use devhub_core::{Project, ProjectSource, ProjectType};
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn ftue_only_opens_when_config_and_cache_are_both_absent() {
@@ -232,5 +268,51 @@ mod startup_tests {
         assert!(!has_scan_sources(0, 0));
         assert!(has_scan_sources(1, 0));
         assert!(has_scan_sources(0, 1));
+    }
+
+    #[test]
+    fn unavailable_local_roots_do_not_block_available_roots() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let available = std::env::temp_dir().join(format!(
+            "devhub-gpui-root-partition-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&available).unwrap();
+        let missing = available.join("missing");
+
+        let (roots, errors) = partition_local_scan_roots(vec![missing.clone(), available.clone()]);
+
+        assert_eq!(roots.as_slice(), std::slice::from_ref(&available));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains(&missing.display().to_string()));
+
+        std::fs::remove_dir_all(available).unwrap();
+    }
+
+    #[test]
+    fn filtering_remains_correct_for_large_project_collections() {
+        let projects = (0..50_000)
+            .map(|index| Project {
+                name: format!("project-{index:05}"),
+                path: PathBuf::from(format!(r"F:\projects\project-{index:05}")),
+                source: ProjectSource::Local,
+                project_type: ProjectType::Rust,
+                has_git: true,
+                git_remote: None,
+                markers_found: vec!["Cargo.toml".into()],
+                last_modified: None,
+                search_key: format!("project-{index:05} rust"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            filtered_project_indices(&projects, "project-49999"),
+            [49_999]
+        );
+        assert!(filtered_project_indices(&projects, "no-match").is_empty());
+        assert_eq!(filtered_project_indices(&projects, "").len(), 50_000);
     }
 }

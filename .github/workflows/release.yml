@@ -1,0 +1,140 @@
+name: build and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: package
+        shell: bash
+        run: |
+          version=$(awk '
+            /^\[package\]$/ { package = 1; next }
+            package && /^version = / { gsub(/[" ]/, "", $3); print $3; exit }
+          ' crates/devhub-gpui/Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: test "${GITHUB_REF_NAME}" = "v${{ steps.package.outputs.version }}"
+
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            executable: devhub-gpui.exe
+            archive: zip
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: devhub-gpui
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            executable: devhub-gpui
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang cmake libasound2-dev libfontconfig-dev \
+            libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libzstd-dev
+
+      - name: Locate the Windows shader compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) { throw 'fxc.exe was not found in the Windows SDK' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+      - name: Build release binary
+        run: cargo build --release --workspace --locked --target ${{ matrix.target }}
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          package="devhub-gpui-${{ needs.metadata.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "$package"
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "$package/"
+          cp README.md RELEASE.md LICENSE "$package/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "${package}.zip" "$package"
+          else
+            tar czf "${package}.tar.gz" "$package"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devhub-gpui-${{ matrix.target }}
+          path: devhub-gpui-${{ needs.metadata.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [metadata, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          find artifacts -type f -print0 | sort -z | xargs -0 sha256sum > checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE.md
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*
+            checksums.txt

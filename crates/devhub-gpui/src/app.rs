@@ -15,14 +15,14 @@ use devhub_core::{
     FileEntry, Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
-    has_scan_sources, language_for_path, markdown_fenced_source, next_selection,
-    omit_markdown_images, previous_selection, should_show_ftue, ScanModel, ScanState, Theme,
-    MONO_FONT, UI_FONT,
+    filtered_project_indices, has_scan_sources, language_for_path, markdown_fenced_source,
+    next_selection, omit_markdown_images, partition_local_scan_roots, previous_selection,
+    should_show_ftue, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::highlighter::HighlightTheme;
-use gpui_component::input::{Input, InputState, Position};
+use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{Icon, IconName};
 use std::collections::HashSet;
@@ -41,7 +41,8 @@ actions!(
         SelectFirstProject,
         SelectLastProject,
         ScanCurrentFolder,
-        OpenSelectedProject
+        OpenSelectedProject,
+        FocusProjectFilter
     ]
 );
 
@@ -53,7 +54,9 @@ struct DevHubLite {
     scan_root: PathBuf,
     config: Config,
     focus_handle: FocusHandle,
-    project_scroll: ScrollHandle,
+    project_scroll: UniformListScrollHandle,
+    filter_input: Entity<InputState>,
+    _filter_subscription: Subscription,
     show_settings: bool,
     pending_scan_dirs: Vec<PathBuf>,
     pending_remote_hosts: Vec<RemoteHostConfig>,
@@ -128,6 +131,9 @@ impl DevHubLite {
         let remote_path_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Remote path, for example /home/user")
         });
+        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter projects"));
+        let _filter_subscription =
+            cx.subscribe_in(&filter_input, window, Self::on_filter_input_event);
         window.focus(&focus_handle);
 
         let mut startup_errors = Vec::new();
@@ -171,7 +177,9 @@ impl DevHubLite {
             scan_root,
             config,
             focus_handle,
-            project_scroll: ScrollHandle::new(),
+            project_scroll: UniformListScrollHandle::new(),
+            filter_input,
+            _filter_subscription,
             show_settings: show_ftue,
             pending_scan_dirs: Vec::new(),
             pending_remote_hosts: Vec::new(),
@@ -211,8 +219,6 @@ impl DevHubLite {
     fn select_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
         self.set_selected(index, cx);
-        self.reset_workspace(cx);
-        self.load_readme(cx);
     }
 
     fn reset_workspace(&mut self, cx: &mut Context<Self>) {
@@ -236,19 +242,19 @@ impl DevHubLite {
 
     fn start_scan(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
-        self.begin_scan(cx);
+        self.begin_scan(window, cx);
     }
 
     fn scan_current_folder(
         &mut self,
         _: &ScanCurrentFolder,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_scan(cx);
+        self.begin_scan(window, cx);
     }
 
-    fn begin_scan(&mut self, cx: &mut Context<Self>) {
+    fn begin_scan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let remote_hosts = self.config.remote_hosts.clone();
         let roots = self.config.scan_dirs.clone();
         if !has_scan_sources(roots.len(), remote_hosts.len()) {
@@ -261,37 +267,27 @@ impl DevHubLite {
         let generation = self.scan.begin();
         let max_depth = self.config.max_depth;
 
+        self.clear_filter(window, cx);
         self.selected = None;
-        self.filter_query.clear();
+        self.reset_workspace(cx);
         self.launch_error = None;
         cx.notify();
 
         let scan_task = cx.background_executor().spawn(async move {
-            let mut invalid: Option<String> = None;
-            for root in &roots {
-                match std::fs::metadata(root) {
-                    Ok(metadata) if !metadata.is_dir() => {
-                        invalid = Some(format!("Scan root is not a directory: {}", root.display()));
-                        break;
-                    }
-                    Err(error) => {
-                        invalid = Some(format!("Cannot scan {}: {error}", root.display()));
-                        break;
-                    }
-                    Ok(_) => {}
-                }
-            }
-            if let Some(message) = invalid {
-                return Err(message);
-            }
-
-            let mut projects = scan_directories(&roots, max_depth);
-            let mut errors = Vec::new();
+            let (available_roots, mut errors) = partition_local_scan_roots(roots);
+            let mut successful_sources = usize::from(!available_roots.is_empty());
+            let mut projects = scan_directories(&available_roots, max_depth);
             for host in remote_hosts {
                 match scan_remote_host(&host) {
-                    Ok(mut remote_projects) => projects.append(&mut remote_projects),
+                    Ok(mut remote_projects) => {
+                        successful_sources += 1;
+                        projects.append(&mut remote_projects);
+                    }
                     Err(error) => errors.push(format!("{}: {error}", host.label())),
                 }
+            }
+            if successful_sources == 0 && !errors.is_empty() {
+                return Err(errors.join(" | "));
             }
             sort_projects(&mut projects);
             Ok((projects, errors))
@@ -306,10 +302,9 @@ impl DevHubLite {
                 };
                 if this.scan.apply_result(generation, result) {
                     this.selected = None;
-                    this.filter_query.clear();
                     this.launch_error =
                         (!remote_errors.is_empty()).then(|| remote_errors.join(" | "));
-                    if let ScanState::Loaded { .. } = this.scan.state {
+                    if matches!(this.scan.state, ScanState::Loaded { .. } | ScanState::Empty) {
                         if let Err(error) = save_projects(&this.scan.projects) {
                             this.launch_error = Some(error);
                         }
@@ -323,22 +318,44 @@ impl DevHubLite {
 
     fn set_selected(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(index);
-        self.project_scroll.scroll_to_item(index);
-        cx.notify();
+        self.project_scroll
+            .scroll_to_item(index, ScrollStrategy::Center);
+        self.reset_workspace(cx);
+        self.load_readme(cx);
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
-        if self.filter_query.is_empty() {
-            (0..self.scan.projects.len()).collect()
-        } else {
-            self.scan
-                .projects
-                .iter()
-                .enumerate()
-                .filter(|(_, project)| project.search_key.contains(&self.filter_query))
-                .map(|(index, _)| index)
-                .collect()
+        filtered_project_indices(&self.scan.projects, &self.filter_query)
+    }
+
+    fn on_filter_input_event(
+        &mut self,
+        state: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.filter_query = state.read(cx).value().to_lowercase();
+                if self.scan.state == ScanState::Scanning {
+                    self.selected = None;
+                    cx.notify();
+                } else {
+                    self.clamp_selection_to_filter(cx);
+                }
+            }
+            InputEvent::PressEnter { .. } => {
+                self.open_selected_project(&OpenSelectedProject, window, cx);
+            }
+            _ => {}
         }
+    }
+
+    fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_query.clear();
+        self.filter_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     fn selected_project(&self) -> Option<&Project> {
@@ -350,19 +367,13 @@ impl DevHubLite {
 
     fn clamp_selection_to_filter(&mut self, cx: &mut Context<Self>) {
         let filtered_count = self.filtered_indices().len();
-        match self.selected {
-            Some(index) if index < filtered_count => {}
-            Some(_) => {
-                self.selected = None;
-            }
-            None => {
-                if filtered_count > 0 {
-                    self.selected = Some(0);
-                    self.project_scroll.scroll_to_item(0);
-                }
-            }
+        if filtered_count > 0 {
+            self.set_selected(0, cx);
+            self.project_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        } else {
+            self.selected = None;
+            self.reset_workspace(cx);
         }
-        cx.notify();
     }
 
     fn handle_filter_keydown(
@@ -406,39 +417,8 @@ impl DevHubLite {
             }
         }
 
-        if key == "escape" {
-            if !self.filter_query.is_empty() {
-                self.filter_query.clear();
-                self.selected = None;
-                cx.notify();
-            }
-            return;
-        }
-
-        if key == "backspace" {
-            if !self.filter_query.is_empty() {
-                self.filter_query.pop();
-                self.clamp_selection_to_filter(cx);
-            }
-            return;
-        }
-
-        if key == "enter" {
-            return;
-        }
-
-        if mods.control || mods.alt || mods.function {
-            return;
-        }
-
-        let candidate = event.keystroke.key_char.as_deref().unwrap_or(key);
-
-        if candidate.chars().count() == 1 {
-            let ch = candidate.chars().next().unwrap();
-            if ch.is_ascii_graphic() || ch == ' ' {
-                self.filter_query.push(ch.to_ascii_lowercase());
-                self.clamp_selection_to_filter(cx);
-            }
+        if key == "escape" && !self.filter_query.is_empty() {
+            self.clear_filter(window, cx);
         }
     }
 
@@ -488,7 +468,7 @@ impl DevHubLite {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.filter_query.is_empty() || self.details_tab == DetailsTab::Search {
+        if self.details_tab == DetailsTab::Search {
             return;
         }
 
@@ -821,7 +801,7 @@ impl DevHubLite {
         cx.notify();
     }
 
-    fn save_settings(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn save_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mut config = self.config.clone();
         config.scan_dirs = self.pending_scan_dirs.clone();
         config.remote_hosts = self.pending_remote_hosts.clone();
@@ -833,7 +813,7 @@ impl DevHubLite {
             Ok(()) => {
                 self.config = config;
                 self.show_settings = false;
-                self.begin_scan(cx);
+                self.begin_scan(window, cx);
             }
             Err(error) => self.launch_error = Some(error),
         }
@@ -1490,6 +1470,19 @@ impl DevHubLite {
         if let Some(index) = previous_selection(self.selected, count) {
             self.set_selected(index, cx);
         }
+    }
+
+    fn focus_project_filter(
+        &mut self,
+        _: &FocusProjectFilter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.show_settings {
+            return;
+        }
+        self.filter_input
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn select_next_project(
@@ -2654,126 +2647,146 @@ impl Render for DevHubLite {
         let visible_count = filtered_indices.len();
         let filter_active = !self.filter_query.is_empty();
 
-        let project_rows =
-            filtered_indices
-                .iter()
-                .enumerate()
-                .map(|(filtered_index, &project_index)| {
-                    let project = self.scan.projects[project_index].clone();
-                    let is_selected = self.selected == Some(filtered_index);
-                    let background = if is_selected {
-                        theme.surface_selected
-                    } else {
-                        theme.sidebar_background
-                    };
-                    let type_color = project_type_color(theme, project.project_type);
-
-                    div()
-                        .id(("project-row", filtered_index))
-                        .h(px(PROJECT_ROW_HEIGHT))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .border_l_1()
-                        .border_color(if is_selected {
-                            if project_list_focused {
-                                theme.focus
-                            } else {
-                                theme.border_strong
-                            }
-                        } else {
-                            theme.sidebar_background
-                        })
-                        .bg(background)
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(theme.surface_hover))
-                        .active(move |style| style.bg(theme.surface_background))
-                        .child(
-                            div()
-                                .w(px(17.0))
-                                .flex_shrink_0()
-                                .text_center()
-                                .text_size(px(13.0))
-                                .text_color(theme.accent)
-                                .child(if is_selected { "›" } else { " " }),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .flex()
-                                .items_baseline()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_size(px(13.0))
-                                        .text_color(theme.text)
-                                        .child(project.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .max_w(px(92.0))
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(10.0))
-                                        .text_color(theme.text_disabled)
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .child(project.path.to_string_lossy().into_owned()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .mx_2()
-                                .flex_shrink_0()
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.0))
-                                .text_color(type_color)
-                                .child(project.project_type.label()),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_project(filtered_index, window, cx);
-                        }))
-                });
-
-        let project_list = match &self.scan.state {
+        let project_row_indices = filtered_indices.clone();
+        let project_list_content: AnyElement = match &self.scan.state {
             ScanState::Scanning => message_panel(
                 "SCANNING",
                 "Filesystem discovery is running in the background.",
                 theme.warning,
                 theme,
-            ),
+            )
+            .into_any_element(),
             ScanState::Error(error) => {
-                message_panel("SCAN FAILED", error.clone(), theme.error, theme)
+                message_panel("SCAN FAILED", error.clone(), theme.error, theme).into_any_element()
             }
             ScanState::Empty => message_panel(
                 "NO PROJECTS",
                 "No projects were found in this folder.",
                 theme.text_muted,
                 theme,
-            ),
+            )
+            .into_any_element(),
             _ if self.scan.projects.is_empty() => message_panel(
                 "NO PROJECTS",
                 "Open the menu to add a local folder or SSH source.",
                 theme.text_muted,
                 theme,
-            ),
+            )
+            .into_any_element(),
             _ if visible_count == 0 => message_panel(
                 "NO MATCHES",
                 format!("No projects match \"{}\".", self.filter_query),
                 theme.text_muted,
                 theme,
-            ),
-            _ => div().flex().flex_col().children(project_rows),
-        }
-        .id("project-list")
-        .track_scroll(&self.project_scroll)
-        .min_h_0()
-        .flex_1()
-        .overflow_y_scroll();
+            )
+            .into_any_element(),
+            _ => uniform_list(
+                "project-list-rows",
+                visible_count,
+                cx.processor(
+                    move |this, visible_range: std::ops::Range<usize>, _window, cx| {
+                        visible_range
+                            .map(|filtered_index| {
+                                let project_index = project_row_indices[filtered_index];
+                                let project = this.scan.projects[project_index].clone();
+                                let is_selected = this.selected == Some(filtered_index);
+                                let background = if is_selected {
+                                    theme.surface_selected
+                                } else {
+                                    theme.sidebar_background
+                                };
+                                let type_color = project_type_color(theme, project.project_type);
+
+                                div()
+                                    .id(("project-row", filtered_index))
+                                    .w_full()
+                                    .h(px(PROJECT_ROW_HEIGHT))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .border_l_1()
+                                    .border_color(if is_selected {
+                                        if project_list_focused {
+                                            theme.focus
+                                        } else {
+                                            theme.border_strong
+                                        }
+                                    } else {
+                                        theme.sidebar_background
+                                    })
+                                    .bg(background)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(theme.surface_hover))
+                                    .active(move |style| style.bg(theme.surface_background))
+                                    .child(
+                                        div()
+                                            .w(px(17.0))
+                                            .flex_shrink_0()
+                                            .text_center()
+                                            .text_size(px(13.0))
+                                            .text_color(theme.accent)
+                                            .child(if is_selected { "›" } else { " " }),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .whitespace_nowrap()
+                                                    .overflow_hidden()
+                                                    .text_size(px(13.0))
+                                                    .text_color(theme.text)
+                                                    .child(project.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .max_w(px(92.0))
+                                                    .font_family(MONO_FONT)
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme.text_disabled)
+                                                    .whitespace_nowrap()
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        project.path.to_string_lossy().into_owned(),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .mx_2()
+                                            .flex_shrink_0()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(10.0))
+                                            .text_color(type_color)
+                                            .child(project.project_type.label()),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select_project(filtered_index, window, cx);
+                                    }))
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                ),
+            )
+            .track_scroll(self.project_scroll.clone())
+            .w_full()
+            .size_full()
+            .into_any_element(),
+        };
+
+        let project_list = div()
+            .id("project-list")
+            .w_full()
+            .min_h_0()
+            .flex_1()
+            .overflow_hidden()
+            .child(project_list_content);
 
         div()
             .id("app")
@@ -2785,6 +2798,7 @@ impl Render for DevHubLite {
             .on_action(cx.listener(Self::select_last_project))
             .on_action(cx.listener(Self::scan_current_folder))
             .on_action(cx.listener(Self::open_selected_project))
+            .on_action(cx.listener(Self::focus_project_filter))
             .on_action(cx.listener(Self::note_component_copy))
             .on_key_down(cx.listener(Self::handle_filter_keydown))
             .size_full()
@@ -2945,15 +2959,22 @@ impl Render for DevHubLite {
                             .bg(theme.sidebar_background)
                             .child(
                                 div()
-                                    .h(px(28.0))
+                                    .h(px(32.0))
                                     .flex_shrink_0()
                                     .flex()
                                     .items_center()
                                     .justify_between()
-                                    .px_2()
+                                    .pl_1()
+                                    .pr_2()
+                                    .gap_2()
                                     .border_b_1()
                                     .border_color(theme.border)
-                                    .child(section_label("PROJECTS", theme))
+                                    .child(
+                                        Input::new(&self.filter_input)
+                                            .h(px(24.0))
+                                            .min_w_0()
+                                            .flex_1(),
+                                    )
                                     .child(
                                         div()
                                             .font_family(MONO_FONT)
@@ -3047,7 +3068,7 @@ impl Render for DevHubLite {
                             .gap_3()
                             .font_family(MONO_FONT)
                             .text_color(theme.text_disabled)
-                            .child("type filter  ·  ↑↓ select  ·  Enter Zed  ·  Ctrl+R scan")
+                            .child("filter  ·  ↑↓ select  ·  Enter Zed  ·  Ctrl+R scan")
                             .child(
                                 div()
                                     .max_w(px(200.0))
@@ -3133,6 +3154,7 @@ pub(crate) fn run() {
             KeyBinding::new("end", SelectLastProject, Some("DevHub")),
             KeyBinding::new("ctrl-r", ScanCurrentFolder, Some("DevHub")),
             KeyBinding::new("enter", OpenSelectedProject, Some("DevHub")),
+            KeyBinding::new("ctrl-f", FocusProjectFilter, Some("DevHub")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);
