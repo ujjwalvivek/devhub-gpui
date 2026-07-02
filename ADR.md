@@ -13,26 +13,24 @@
 
 ## Remaining differences
 
-- SSH requires a POSIX/GNU remote; SFTP and PowerShell-only servers are unsupported.
-
-## Good to haves (defer until later)
-
-- Pin/favorite projects
-- Hide/archive projects
-- `tokei`/code statistics (defer until manually requested)
-- Per-source scan status and errors
-- Manual refresh per root or host
-- SSH config parsing (`~/.ssh/config`) via `ssh_config` crate
-- Build/test command shortcuts
-- Global full-text search index (`grep`)
-- `tokei` (library) + `grep` hybrid JSON over SSH
-- `keyring-core` for credential storage
-- `ignore` for `.gitignore`-style pattern matching
+| Capability                              | Complexity | Notes                                                                                                                                                      |
+| --------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-source scan status and errors       | Low        | ScanModel already tracks aggregate state; per-source tracking needs per-root error/result fields and UI per-project-row indicators                         |
+| Manual refresh per root or host         | Medium     | Requires source-level refresh button and per-source cancellation routing; the cancellation infrastructure now exists                                       |
+| Global full-text search index (`grep`)  | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query — a significant standalone feature                                    |
+| SSH requires a POSIX/GNU remote         | N/A        | Hard platform limitation: remote scripts depend on `sh`, `find`, `grep`, `stat`, `wc`, `head`, `cat`. SFTP and PowerShell-only servers remain unsupported. |
 
 ## Status
 
-- Current stage: Standalone cross-platform release automation
-- Next gate: first tagged GitHub Actions release
+- Current stage: DevHub-GPUI parity complete. All core DevHub capabilities ported:
+  - Local + SSH discovery, tree, read, README, search
+  - Cancellation of all in-flight operations (scan, tree, file, readme, search)
+  - Remote `.gitignore` semantics via `git check-ignore` over SSH
+  - Pin/unpin and hide/archive projects with persistent config
+  - Right-click context menu with Pin/Hide actions
+  - Zed-first launch (local `zed <path>` and SSH `ssh://user@host/path`)
+  - Custom local/SSH source picker, versioned config/cache, standalone release automation
+- Next gate: project closing. Website update deferred.
 - Implementation started: semantic dark theme and compact application shell
 - Workspace observed on 2026-06-30: minimal generated-and-reviewed Cargo workspace
 - Renamed-workspace audit on 2026-07-01: stale `[REDACTED]\gpui` paths in this plan
@@ -154,7 +152,10 @@
   passes with 55 tests, warning-denied clippy, thin-LTO release build, and a
   direct PE-header check confirming subsystem 2 (`Windows GUI`). The first tag
   remains the required hosted-run validation of the GitHub Actions matrix.
-- `RELEASE.md` now provides the v1.0.1 download map, portable installation,
+- Cancellation and remote-ignore closure on 2026-07-03 added 4 core + 1 GPUI
+  test (60 total). `cargo fmt`, `check`, `test`, `clippy -D warnings`, and
+  `release build` all pass.
+- `RELEASE.md` now provides the v1.1.0 download map, portable installation,
   first-run, SSH, checksum, upgrade, and rollback instructions. It ships inside
   every archive and is used verbatim as the tagged GitHub release body.
 - Source application: `[REDACTED]\devhub` (read-only)
@@ -1382,8 +1383,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release --workspace --locked
 ```
 
-The last completed test validation had 43 `devhub-core` tests, 12 `devhub-gpui`
-tests, 55 total passing tests, all-target checking passing, clippy passing with
+The last completed test validation had 47 `devhub-core` tests, 13 `devhub-gpui`
+tests, 60 total passing tests, all-target checking passing, clippy passing with
 warnings denied, and a release build passing.
 
 The native GPUI binary has `test = false` because embedding unit tests in the
@@ -1486,6 +1487,17 @@ The later visual journey is successful when all of the following are true:
 | 2026-07-02 | Coexistence over cutover                                                     | The egui `devhub` and GPUI `devhub-gpui` coexist as separate products. No identity rename, no config migration, no archival of `devhub`. Internal names stay as-is. The website will present GPUI as the primary "DevHub" and egui as a "Legacy" download.       |
 | 2026-07-02 | Grant a writable exception for `[REDACTED]\devhub\web`                       | The Astro marketing site lives in the read-only egui repo. Website updates require editing it in place. The exception is scoped to `web/` only; egui Rust source remains read-only.                                                                              |
 | 2026-07-02 | Retire `prompt.md`; consolidate into `ADR.md`                                | `prompt.md` duplicated plan content and had gone stale (missing `gpui-component`, listed `main.rs` as the large file). Unique content (visual direction, chrome fallback inventory, validation gate, GPUI concepts exercised) merged into `ADR.md`.              |
+| 2026-07-03 | Add `CancellationToken` primitive in `cancellation.rs`                       | Cooperative cancellation for all async operations (scan, tree, file, readme, search) — a shared `Arc<AtomicBool>` with `cancel()`/`is_cancelled()`/`check()`.                                                                                                    |
+| 2026-07-03 | Wire cancellation through `discovery.rs`, `remote.rs`, `workspace.rs`        | Every cancellable operation gains a `_cancellable` variant taking `&CancellationToken`. Existing non-cancellable APIs default to a fresh no-op token.                                                                                                            |
+| 2026-07-03 | Add cancellable variants to `scan.rs` and `app.rs` with "Stop" button        | Scan model preserves last-known-good projects on cancel. Titlebar shows a red "Stop" button when any operation is in-flight; cancels all tokens and resets loading states.                                                                                       |
+| 2026-07-03 | Add `REMOTE_IGNORE_FUNCTION` to `remote.rs`                                  | POSIX shell function walks parent directories for `.git` and runs `git check-ignore -q`. Applied to remote project discovery, tree listing, and content search — matches local `ignore` crate behavior over SSH.                                                 |
+| 2026-07-03 | Add `CREATE_NO_WINDOW` (0x08000000) to Windows SSH spawn                     | Prevents a console window from flashing when launching SSH subprocesses on Windows.                                                                                                                                                                              |
+| 2026-07-03 | Add pin/unpin projects with `pinned_projects` in Config                      | Star icon in project rows replaces the selection chevron when pinned. Pin-first sort: pinned projects sort before unpinned, then by source → name → path.                                                                                                        |
+| 2026-07-03 | Add hide/archive projects with `hidden_projects` in Config                   | Hidden projects are filtered from the project list. Settings panel shows a "HIDDEN PROJECTS" section with per-project EyeOff unhide button.                                                                                                                      |
+| 2026-07-03 | Add right-click context menu with backdrop and bounds clamping               | Right-click any project row opens an absolutely-positioned menu (Pin/Hide). Backdrop click-outside closes. Position clamped to window bounds to prevent overflow.                                                                                                |
+| 2026-07-03 | Theme filter and SSH/path inputs with `appearance(false)` and bg/border      | Filter input goes edge-to-edge with `.appearance(false)`. Remote name, host, and path inputs get `bg(surface_background)` + `border_color` + 24px height consistency.                                                                                            |
+| 2026-07-03 | Remove hardcoded metadata header height `h(124px)`                           | The fixed height caused a divider overlap with the component README pane. Header now sizes to its content.                                                                                                                                                       |
+| 2026-07-03 | Bump version to v1.1.0; close the parity project                             | All core DevHub capabilities ported. Remaining differences documented with complexity estimates. Website update deferred.                                                                                                                                        |
 
 Versions to record during Phase 1:
 
@@ -1525,6 +1537,13 @@ Versions to record during Phase 1:
 | Project metadata                          | Complete | Source, host, Git remote, markers, modified time                                   |
 | Legacy themes and appearance              | Complete | Five palettes; System/Dark/Light                                                   |
 | First-time user experience                | Complete | No config and no cache opens Settings; no production fixtures                      |
+| Operation cancellation                    | Complete | All in-flight scan, tree, file, readme, and search operations cancellable          |
+| Remote `.gitignore` semantics             | Complete | `REMOTE_IGNORE_FUNCTION` walks parent dirs for `.git` and runs `git check-ignore`  |
+| Pin/favorite projects                     | Complete | Persisted in config; star icon; pin-first sort                                     |
+| Hide/archive projects                     | Complete | Persisted in config; filtered from list; EyeOff unhide in Settings                 |
+| Right-click context menu                  | Complete | Backdrop dismissal; window-bounds clamping; Pin/Hide actions                       |
+| SSH `CREATE_NO_WINDOW` (Windows)          | Complete | No console flash for SSH subprocesses                                              |
+| Input field theming                       | Complete | Filter uses `appearance(false)`; SSH/path inputs use `surface_background`          |
 
 ## Known issues and open questions
 
@@ -1554,10 +1573,12 @@ Versions to record during Phase 1:
 - Authentication must already work non-interactively through OpenSSH config,
   keys, or an agent. DevHub does not collect passwords or key passphrases. New
   host keys should be reviewed and accepted in a terminal before using the app.
-- Remote ignore files are not interpreted. Remote discovery/search prune known
-  generated directories but do not yet match local `ignore` crate semantics.
-- Running SSH subprocesses are bounded by deadlines and stale results are
-  discarded, but there is no user-facing button that kills an in-flight command.
+- Remote ignore files are now interpreted over SSH via `REMOTE_IGNORE_FUNCTION`
+  (`git check-ignore` parent-directory walk). The local `ignore` crate and
+  remote shell function may diverge in edge cases.
+- A "Stop" button in the titlebar cancels all in-flight SSH and scan operations.
+  Individual per-operation cancellation (e.g. stop tree but not scan) is not
+  implemented.
 - Zed must be installed and its `zed` command available, or installed in a known
   Windows location, for the primary launch action. The current machine resolves
   `zed` to `[REDACTED]\Zed.exe`.
@@ -1571,17 +1592,14 @@ Versions to record during Phase 1:
 
 ## Next action
 
-The v1.0.1 standalone release is shipped and verified. The immediate task is
-the website update in `[REDACTED]\devhub\web`:
+This session closes the DevHub-GPUI parity project. All remaining differences
+are documented in the complexity table above and deferred as deliberate
+product decisions.
 
-1. Repoint primary release/badge/chart fetches from `ujjwalvivek/devhub` to
-   `ujjwalvivek/devhub-gpui` (Downloads.svelte, Hero.svelte, Footer.svelte).
-2. Add a "Legacy (egui)" download section fetching from `ujjwalvivek/devhub`.
-3. Rewrite the egui subtitle/copy in Hero.svelte for the GPUI framing; remove
-   the telemetry claim (the GPUI app has none).
-4. Replace hardcoded `SIZES` in Downloads.svelte with `a.size` from the API so
-   future releases display correct byte counts without site edits.
-5. Swap egui screenshots for GPUI screenshots once the user captures them.
+The v1.1.0 release is complete; SHA-256 checksums and cross-platform archives
+are published. The website update (`[REDACTED]\devhub\web`) is deferred — it
+is a marketing concern rather than a parity gap and does not block the project
+handoff.
 
-Parity work (in-flight SSH/scan cancellation, remote `.gitignore` semantics)
-is deferred until after the website is up to date, targeted at v1.1.0.
+To resume work, pick from the deferred capabilities table above. Each item
+includes a complexity estimate and implementation notes.

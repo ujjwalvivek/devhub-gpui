@@ -1,4 +1,4 @@
-# DevHub GPUI 1.0.1
+# DevHub GPUI 1.1.0
 
 DevHub GPUI is a compact, Zed-first project hub for discovering and opening local and SSH-hosted projects. This release contains portable archives for Windows, Linux, and macOS.
 
@@ -6,9 +6,9 @@ DevHub GPUI is a compact, Zed-first project hub for discovering and opening loca
 
 Choose the archive matching your platform:
 
-- `devhub-gpui-1.0.1-x86_64-pc-windows-msvc.zip` for Windows x64
-- `devhub-gpui-1.0.1-x86_64-unknown-linux-gnu.tar.gz` for Linux x64
-- `devhub-gpui-1.0.1-aarch64-apple-darwin.tar.gz` for macOS Apple Silicon
+- `devhub-gpui-1.1.0-x86_64-pc-windows-msvc.zip` for Windows x64
+- `devhub-gpui-1.1.0-x86_64-unknown-linux-gnu.tar.gz` for Linux x64
+- `devhub-gpui-1.1.0-aarch64-apple-darwin.tar.gz` for macOS Apple Silicon
 
 Each archive contains the executable, `README.md`, `RELEASE.md`, and `LICENSE`. The release also includes `checksums.txt` with SHA-256 hashes for every archive.
 
@@ -45,6 +45,14 @@ The macOS artifact targets Apple Silicon. It is an unsigned portable binary, not
 
 The first launch opens source settings. Add at least one local folder or SSH source, choose its scan depth, save, and run a scan. DevHub GPUI never scans the current working directory as an implicit fallback. Configuration and cache data use the separate `devhub-gpui` platform identity. They do not overwrite the original DevHub application's data.
 
+## Project parity
+
+v1.1.0 completes the DevHub parity project. All core capabilities are ported:
+scan cancellation with a "Stop" button, remote `.gitignore` semantics via
+`git check-ignore`, pin/unpin and hide/archive projects with persistent config,
+right-click context menus, themed input fields, and Windows SSH without console
+window flash.
+
 ## Zed and SSH
 
 Local projects open through the `zed` command. Remote projects use Zed's `ssh://user@host/path` target format.
@@ -58,13 +66,13 @@ Compare an archive's SHA-256 hash with `checksums.txt` before running it.
 PowerShell:
 
 ```powershell
-Get-FileHash .\devhub-gpui-1.0.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\devhub-gpui-1.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 ```
 
 Linux or macOS:
 
 ```sh
-sha256sum devhub-gpui-1.0.1-x86_64-unknown-linux-gnu.tar.gz
+sha256sum devhub-gpui-1.1.0-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ## Upgrade and rollback

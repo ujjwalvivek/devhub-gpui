@@ -425,8 +425,8 @@ fn run_ssh_script(
 ) -> Result<String, String> {
     cancellation.check()?;
     let host = validate_ssh_host(host)?;
-    let mut child = Command::new("ssh")
-        .arg("-T")
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -438,7 +438,13 @@ fn run_ssh_script(
         .arg("-s")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|error| format!("starting ssh for {host}: {error}"))?;
 

@@ -97,6 +97,7 @@ struct DevHubLite {
     readme_preview: bool,
     tree_width_px: f32,
     dragging_split: bool,
+    context_menu: Option<(usize, f32, f32)>,
 }
 
 #[derive(Clone, Copy)]
@@ -226,11 +227,13 @@ impl DevHubLite {
             readme_preview: true,
             tree_width_px: 130.0,
             dragging_split: false,
+            context_menu: None,
         }
     }
 
     fn select_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
+        self.context_menu = None;
         self.set_selected(index, cx);
     }
 
@@ -306,6 +309,75 @@ impl DevHubLite {
             self.readme_state = LoadState::Idle;
         }
         self.show_copy_feedback("CANCELLED", cx);
+        cx.notify();
+    }
+
+    fn is_pinned(&self, project: &Project) -> bool {
+        self.config.pinned_projects.contains(&project.path)
+    }
+
+    fn toggle_pin(&mut self, filtered_index: usize, cx: &mut Context<Self>) {
+        let indices = self.filtered_indices();
+        let Some(&project_index) = indices.get(filtered_index) else {
+            return;
+        };
+        let Some(project) = self.scan.projects.get(project_index) else {
+            return;
+        };
+        let path = &project.path;
+        if let Some(pos) = self.config.pinned_projects.iter().position(|p| p == path) {
+            self.config.pinned_projects.remove(pos);
+        } else {
+            self.config.pinned_projects.push(path.clone());
+        }
+        if let Err(error) = self.config.save() {
+            self.launch_error = Some(error);
+        }
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn is_hidden(&self, project: &Project) -> bool {
+        self.config.hidden_projects.contains(&project.path)
+    }
+
+    fn toggle_hide(&mut self, filtered_index: usize, cx: &mut Context<Self>) {
+        let indices = self.filtered_indices();
+        let Some(&project_index) = indices.get(filtered_index) else {
+            return;
+        };
+        let Some(project) = self.scan.projects.get(project_index) else {
+            return;
+        };
+        let path = &project.path;
+        if let Some(pos) = self.config.hidden_projects.iter().position(|p| p == path) {
+            self.config.hidden_projects.remove(pos);
+        } else {
+            self.config.hidden_projects.push(path.clone());
+        }
+        if let Err(error) = self.config.save() {
+            self.launch_error = Some(error);
+        }
+        self.context_menu = None;
+        self.selected = None;
+        cx.notify();
+    }
+
+    fn unhide_project(&mut self, project_index: usize, cx: &mut Context<Self>) {
+        let Some(project) = self.scan.projects.get(project_index) else {
+            return;
+        };
+        if let Some(pos) = self
+            .config
+            .hidden_projects
+            .iter()
+            .position(|p| p == &project.path)
+        {
+            self.config.hidden_projects.remove(pos);
+        }
+        if let Err(error) = self.config.save() {
+            self.launch_error = Some(error);
+        }
         cx.notify();
     }
 
@@ -400,7 +472,25 @@ impl DevHubLite {
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
-        filtered_project_indices(&self.scan.projects, &self.filter_query)
+        let mut indices = filtered_project_indices(&self.scan.projects, &self.filter_query);
+        indices.retain(|&idx| {
+            self.scan
+                .projects
+                .get(idx)
+                .is_some_and(|p| !self.is_hidden(p))
+        });
+        let pinned: std::collections::HashSet<&std::path::PathBuf> =
+            self.config.pinned_projects.iter().collect();
+        indices.sort_by_key(|&idx| {
+            let project = &self.scan.projects[idx];
+            (
+                if pinned.contains(&project.path) { 0 } else { 1 },
+                project.source.label().to_lowercase(),
+                project.name.to_lowercase(),
+                project.path.to_string_lossy().to_lowercase(),
+            )
+        });
+        indices
     }
 
     fn on_filter_input_event(
@@ -428,6 +518,7 @@ impl DevHubLite {
     }
 
     fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu = None;
         self.filter_query.clear();
         self.filter_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -1135,12 +1226,22 @@ impl DevHubLite {
                             .child(
                                 div()
                                     .w(px(180.0))
-                                    .child(Input::new(&self.remote_name_input).h(px(28.0))),
+                                    .child(
+                                        Input::new(&self.remote_name_input)
+                                            .h(px(24.0))
+                                            .bg(theme.surface_background)
+                                            .border_color(theme.border),
+                                    ),
                             )
                             .child(
                                 div()
                                     .w(px(260.0))
-                                    .child(Input::new(&self.remote_host_input).h(px(28.0))),
+                                    .child(
+                                        Input::new(&self.remote_host_input)
+                                            .h(px(24.0))
+                                            .bg(theme.surface_background)
+                                            .border_color(theme.border),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1163,6 +1264,53 @@ impl DevHubLite {
                             .child(
                                 "SSH uses your OpenSSH config and keys in BatchMode; remote hosts must provide a POSIX sh environment.",
                             ),
+                    )
+                    .child(div().h(px(12.0)))
+                    .child(section_label("HIDDEN PROJECTS", theme))
+                    .children(
+                        self.scan
+                            .projects
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| self.is_hidden(p))
+                            .map(|(i, project)| {
+                                div()
+                                    .id(("hidden-project-row", i))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(10.0))
+                                            .text_color(theme.text_muted)
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .child(format!(
+                                                "{} | {}",
+                                                project.source.label(),
+                                                project.name
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("unhide-project", i))
+                                            .flex_shrink_0()
+                                            .cursor_pointer()
+                                            .text_color(theme.text_muted)
+                                            .hover(move |style| style.text_color(theme.text))
+                                            .child(Icon::new(IconName::EyeOff).size(px(14.0)))
+                                            .on_click(cx.listener(
+                                                move |this: &mut DevHubLite,
+                                                      _: &gpui::ClickEvent,
+                                                      _window,
+                                                      cx| {
+                                                    this.unhide_project(i, cx);
+                                                },
+                                            )),
+                                    )
+                            }),
                     )
                     .child(div().h(px(12.0)))
                     .child(section_label("APPEARANCE", theme))
@@ -1433,13 +1581,17 @@ impl DevHubLite {
                 .items_center()
                 .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .child(Input::new(&self.remote_path_input).h(px(28.0))),
+                    div().flex_1().child(
+                        Input::new(&self.remote_path_input)
+                            .h(px(24.0))
+                            .bg(theme.surface_background)
+                            .border_color(theme.border),
+                    ),
                 )
                 .child(
                     div()
                         .id("picker-go-remote")
+                        .h(px(24.0))
                         .px_2()
                         .py_1()
                         .border_1()
@@ -2145,7 +2297,6 @@ impl DevHubLite {
             .flex_col()
             .child(
                 div()
-                    .h(px(124.0))
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
@@ -2785,6 +2936,7 @@ impl Render for DevHubLite {
                 visible_count,
                 cx.processor(
                     move |this, visible_range: std::ops::Range<usize>, _window, cx| {
+                        let menu_open_filtered = this.context_menu.map(|(idx, _, _)| idx);
                         visible_range
                             .map(|filtered_index| {
                                 let project_index = project_row_indices[filtered_index];
@@ -2796,7 +2948,10 @@ impl Render for DevHubLite {
                                     theme.sidebar_background
                                 };
                                 let type_color = project_type_color(theme, project.project_type);
+                                let show_hover = menu_open_filtered
+                                    .is_none_or(|menu_idx| menu_idx == filtered_index);
 
+                                let is_pinned = this.is_pinned(&project);
                                 div()
                                     .id(("project-row", filtered_index))
                                     .w_full()
@@ -2816,17 +2971,35 @@ impl Render for DevHubLite {
                                     })
                                     .bg(background)
                                     .cursor_pointer()
-                                    .hover(move |style| style.bg(theme.surface_hover))
+                                    .when(show_hover, move |this| {
+                                        this.hover(move |style| style.bg(theme.surface_hover))
+                                    })
                                     .active(move |style| style.bg(theme.surface_background))
-                                    .child(
+                                    .child(if is_selected {
                                         div()
                                             .w(px(17.0))
                                             .flex_shrink_0()
                                             .text_center()
                                             .text_size(px(13.0))
                                             .text_color(theme.accent)
-                                            .child(if is_selected { "›" } else { " " }),
-                                    )
+                                            .child("›")
+                                            .into_any_element()
+                                    } else if is_pinned {
+                                        div()
+                                            .w(px(17.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                Icon::new(IconName::Star)
+                                                    .size(px(11.0))
+                                                    .text_color(theme.accent),
+                                            )
+                                            .into_any_element()
+                                    } else {
+                                        div().w(px(17.0)).flex_shrink_0().into_any_element()
+                                    })
                                     .child(
                                         div()
                                             .min_w_0()
@@ -2866,6 +3039,23 @@ impl Render for DevHubLite {
                                             .text_color(type_color)
                                             .child(project.project_type.label()),
                                     )
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(
+                                            move |this: &mut DevHubLite,
+                                                  event: &gpui::MouseDownEvent,
+                                                  _window,
+                                                  cx| {
+                                                this.selected = Some(filtered_index);
+                                                this.context_menu = Some((
+                                                    filtered_index,
+                                                    event.position.x.into(),
+                                                    event.position.y.into(),
+                                                ));
+                                                cx.notify();
+                                            },
+                                        ),
+                                    )
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.select_project(filtered_index, window, cx);
                                     }))
@@ -2888,7 +3078,7 @@ impl Render for DevHubLite {
             .overflow_hidden()
             .child(project_list_content);
 
-        div()
+        let app = div()
             .id("app")
             .track_focus(&self.focus_handle)
             .key_context("DevHub")
@@ -3085,17 +3275,15 @@ impl Render for DevHubLite {
                                     .flex_shrink_0()
                                     .flex()
                                     .items_center()
-                                    .justify_between()
-                                    .pl_1()
-                                    .pr_2()
-                                    .gap_2()
+                                    .px_1()
+                                    .gap_1()
                                     .border_b_1()
                                     .border_color(theme.border)
                                     .child(
                                         Input::new(&self.filter_input)
-                                            .h(px(24.0))
                                             .min_w_0()
-                                            .flex_1(),
+                                            .flex_1()
+                                            .appearance(false),
                                     )
                                     .child(
                                         div()
@@ -3199,7 +3387,95 @@ impl Render for DevHubLite {
                                     .child(self.scan_root.to_string_lossy().into_owned()),
                             ),
                     ),
-            )
+            );
+
+        if let Some((filtered_index, raw_x, raw_y)) = self.context_menu {
+            let bounds = window.bounds();
+            let win_w: f32 = bounds.size.width.into();
+            let win_h: f32 = bounds.size.height.into();
+            let menu_w = 160.0;
+            let menu_h = 84.0;
+            let context_x = (raw_x + menu_w).min(win_w) - menu_w;
+            let context_x = context_x.max(0.0);
+            let context_y = (raw_y + menu_h).min(win_h) - menu_h;
+            let context_y = context_y.max(0.0);
+
+            let is_pinned = self
+                .filtered_indices()
+                .get(filtered_index)
+                .and_then(|&idx| self.scan.projects.get(idx))
+                .is_some_and(|p| self.is_pinned(p));
+
+            let pin_listener = cx.listener(
+                move |this: &mut DevHubLite, _: &gpui::MouseDownEvent, _window, cx| {
+                    this.toggle_pin(filtered_index, cx);
+                },
+            );
+
+            let hide_listener = cx.listener(
+                move |this: &mut DevHubLite, _: &gpui::MouseDownEvent, _window, cx| {
+                    this.toggle_hide(filtered_index, cx);
+                },
+            );
+
+            let entity = cx.entity();
+
+            let backdrop_close =
+                move |_: &gpui::MouseDownEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                    entity.update(cx, |this, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    });
+                };
+
+            div()
+                .relative()
+                .size_full()
+                .child(app)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_down(MouseButton::Left, backdrop_close)
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(context_x))
+                                .top(px(context_y))
+                                .min_w(px(140.0))
+                                .bg(theme.surface_background)
+                                .border_1()
+                                .border_color(theme.border)
+                                .rounded_sm()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text)
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(theme.surface_hover))
+                                        .child(if is_pinned { "Unpin" } else { "Pin" })
+                                        .on_mouse_down(MouseButton::Left, pin_listener),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text)
+                                        .cursor_pointer()
+                                        .hover(move |style| style.bg(theme.surface_hover))
+                                        .child("Hide")
+                                        .on_mouse_down(MouseButton::Left, hide_listener),
+                                ),
+                        ),
+                )
+                .into_any()
+        } else {
+            app.into_any()
+        }
     }
 }
 

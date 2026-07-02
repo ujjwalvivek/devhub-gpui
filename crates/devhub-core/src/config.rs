@@ -83,6 +83,12 @@ pub struct Config {
 
     #[serde(default)]
     pub remote_hosts: Vec<RemoteHostConfig>,
+
+    #[serde(default)]
+    pub pinned_projects: Vec<PathBuf>,
+
+    #[serde(default)]
+    pub hidden_projects: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +138,8 @@ impl Default for Config {
             scan_dirs: Vec::new(),
             max_depth: default_max_depth(),
             remote_hosts: Vec::new(),
+            pinned_projects: Vec::new(),
+            hidden_projects: Vec::new(),
         }
     }
 }
@@ -342,6 +350,8 @@ mod tests {
                 roots: vec!["/srv/code".into()],
                 max_depth: 4,
             }],
+            pinned_projects: Vec::new(),
+            hidden_projects: Vec::new(),
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
