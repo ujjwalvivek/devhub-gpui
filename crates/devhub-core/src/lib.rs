@@ -4,7 +4,7 @@ mod discovery;
 mod remote;
 mod workspace;
 
-pub use cache::{load_projects, save_projects};
+pub use cache::{cache_path, load_projects, save_projects};
 pub use config::{normalize_ssh_host, AppearanceMode, Config, RemoteHostConfig, ThemeId};
 pub use discovery::{scan_directories, sort_projects, Project, ProjectSource, ProjectType};
 pub use remote::{

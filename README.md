@@ -7,6 +7,10 @@ application remains the behavioral reference; this workspace does not modify it.
 
 - Discover projects from configurable local roots and SSH hosts and cache the results.
 - Add local and SSH roots through one custom source picker.
+- Open source settings automatically on a true first launch; production startup
+  never injects fixture projects.
+- Open source settings automatically on a true first launch; production startup
+  never injects fixture projects.
 - Filter and select projects; open local or SSH projects directly in Zed, with
   Windows "Open with" as a best-effort fallback.
 - Browse bounded local and remote project trees.
@@ -55,6 +59,10 @@ cargo run --release -p devhub-gpui
 ```
 
 Scanning and other filesystem access occur only after an explicit user action.
+Scan requires at least one configured local or SSH source; it never falls back
+to scanning the process working directory.
+Scan requires at least one configured local or SSH source; it never falls back
+to scanning the process working directory.
 Configuration is written under the platform configuration directory using the
 `devhub-gpui` identity, so it cannot overwrite the egui DevHub configuration.
 SSH uses `BatchMode=yes`, the user's existing OpenSSH configuration and keys,

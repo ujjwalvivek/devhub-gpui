@@ -1,6 +1,14 @@
 mod scan;
 mod theme;
 
+pub fn should_show_ftue(config_exists: bool, cache_exists: bool) -> bool {
+    !config_exists && !cache_exists
+}
+
+pub fn has_scan_sources(local_roots: usize, remote_hosts: usize) -> bool {
+    local_roots > 0 || remote_hosts > 0
+}
+
 mod text_support {
     use std::path::Path;
 
@@ -206,3 +214,23 @@ mod text_support {
 pub use scan::{next_selection, previous_selection, ScanModel, ScanState};
 pub use text_support::{language_for_path, markdown_fenced_source, omit_markdown_images};
 pub use theme::{Theme, MONO_FONT, UI_FONT};
+
+#[cfg(test)]
+mod startup_tests {
+    use super::{has_scan_sources, should_show_ftue};
+
+    #[test]
+    fn ftue_only_opens_when_config_and_cache_are_both_absent() {
+        assert!(should_show_ftue(false, false));
+        assert!(!should_show_ftue(true, false));
+        assert!(!should_show_ftue(false, true));
+        assert!(!should_show_ftue(true, true));
+    }
+
+    #[test]
+    fn scan_requires_a_configured_local_or_remote_source() {
+        assert!(!has_scan_sources(0, 0));
+        assert!(has_scan_sources(1, 0));
+        assert!(has_scan_sources(0, 1));
+    }
+}

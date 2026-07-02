@@ -8,15 +8,16 @@ use crate::ui::{
     window_control, workbench_message,
 };
 use devhub_core::{
-    list_local_subdirs, list_project_tree, list_remote_subdirs, load_projects, local_roots,
-    open_project_in_zed, read_project_file, read_project_readme, save_projects, scan_directories,
-    scan_remote_host, search_project_content, sort_projects, validate_remote_path,
-    validate_ssh_host, zed_ssh_uri, AppearanceMode, Config, DirectoryEntry, FileEntry, Project,
-    ProjectSource, ProjectType, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
+    cache_path, list_local_subdirs, list_project_tree, list_remote_subdirs, load_projects,
+    local_roots, open_project_in_zed, read_project_file, read_project_readme, save_projects,
+    scan_directories, scan_remote_host, search_project_content, sort_projects,
+    validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode, Config, DirectoryEntry,
+    FileEntry, Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
-    language_for_path, markdown_fenced_source, next_selection, omit_markdown_images,
-    previous_selection, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
+    has_scan_sources, language_for_path, markdown_fenced_source, next_selection,
+    omit_markdown_images, previous_selection, should_show_ftue, ScanModel, ScanState, Theme,
+    MONO_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -130,6 +131,9 @@ impl DevHubLite {
         window.focus(&focus_handle);
 
         let mut startup_errors = Vec::new();
+        let config_existed = Config::config_path().is_some_and(|path| path.is_file());
+        let cache_existed = cache_path().is_some_and(|path| path.is_file());
+        let show_ftue = should_show_ftue(config_existed, cache_existed);
         if let Err(error) = Config::ensure_dirs_exist() {
             startup_errors.push(error);
         }
@@ -148,34 +152,12 @@ impl DevHubLite {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let fixtures = || {
-            vec![
-                fixture_project(
-                    "devhub",
-                    r"F:\_Engine\devhub",
-                    ProjectType::Rust,
-                    "Cargo.toml",
-                ),
-                fixture_project(
-                    "devhub-gpui",
-                    r"F:\_Engine\devhub-gpui",
-                    ProjectType::Rust,
-                    "Cargo.toml",
-                ),
-                fixture_project(
-                    "echopoint",
-                    r"F:\_Engine\echopoint",
-                    ProjectType::Node,
-                    "package.json",
-                ),
-            ]
-        };
         let initial_projects = match load_projects() {
             Ok(Some(projects)) => projects,
-            Ok(None) => fixtures(),
+            Ok(None) => Vec::new(),
             Err(error) => {
                 startup_errors.push(error);
-                fixtures()
+                Vec::new()
             }
         };
         let pending_theme = config.theme;
@@ -190,7 +172,7 @@ impl DevHubLite {
             config,
             focus_handle,
             project_scroll: ScrollHandle::new(),
-            show_settings: false,
+            show_settings: show_ftue,
             pending_scan_dirs: Vec::new(),
             pending_remote_hosts: Vec::new(),
             pending_max_depth: 3,
@@ -267,13 +249,16 @@ impl DevHubLite {
     }
 
     fn begin_scan(&mut self, cx: &mut Context<Self>) {
-        let generation = self.scan.begin();
         let remote_hosts = self.config.remote_hosts.clone();
-        let roots = if self.config.scan_dirs.is_empty() && remote_hosts.is_empty() {
-            vec![self.scan_root.clone()]
-        } else {
-            self.config.scan_dirs.clone()
-        };
+        let roots = self.config.scan_dirs.clone();
+        if !has_scan_sources(roots.len(), remote_hosts.len()) {
+            self.launch_error =
+                Some("Add at least one local folder or SSH source before scanning.".into());
+            cx.notify();
+            return;
+        }
+
+        let generation = self.scan.begin();
         let max_depth = self.config.max_depth;
 
         self.selected = None;
@@ -2771,8 +2756,8 @@ impl Render for DevHubLite {
                 theme,
             ),
             _ if self.scan.projects.is_empty() => message_panel(
-                "NO FIXTURES",
-                "No fixture projects are available.",
+                "NO PROJECTS",
+                "Open the menu to add a local folder or SSH source.",
                 theme.text_muted,
                 theme,
             ),
@@ -2823,6 +2808,36 @@ impl Render for DevHubLite {
                     .bg(titlebar_background)
                     .child(
                         div()
+                            .id("settings-button")
+                            .h_full()
+                            .w(px(34.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .text_color(if self.show_settings {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            })
+                            .cursor_pointer()
+                            .hover(move |style| {
+                                style.bg(theme.surface_hover).text_color(theme.text)
+                            })
+                            .active(move |style| style.bg(theme.surface_selected))
+                            .child(Icon::new(IconName::Menu).size(px(15.0)).text_color(
+                                if self.show_settings {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                },
+                            ))
+                            .on_click(cx.listener(Self::toggle_settings)),
+                    )
+                    .child(
+                        div()
                             .id("window-drag-region")
                             .min_w_0()
                             .h_full()
@@ -2839,7 +2854,6 @@ impl Render for DevHubLite {
                                     begin_window_drag(window);
                                 }
                             })
-                            .child(img("appicon.png").size(px(18.0)))
                             .child(
                                 div()
                                     .text_size(px(12.0))
@@ -2884,35 +2898,6 @@ impl Render for DevHubLite {
                             .active(move |style| style.bg(theme.surface_selected))
                             .child(scan_button_label)
                             .on_click(cx.listener(Self::start_scan)),
-                    )
-                    .child(
-                        div()
-                            .id("settings-button")
-                            .h(px(23.0))
-                            .w(px(26.0))
-                            .ml_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .bg(theme.surface_background)
-                            .text_size(px(12.0))
-                            .text_color(if self.show_settings {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            })
-                            .cursor_pointer()
-                            .hover(move |style| {
-                                style
-                                    .bg(theme.surface_hover)
-                                    .border_color(theme.text_disabled)
-                                    .text_color(theme.text)
-                            })
-                            .active(move |style| style.bg(theme.surface_selected))
-                            .child("\u{2699}")
-                            .on_click(cx.listener(Self::toggle_settings)),
                     )
                     .child(
                         div()
@@ -3130,22 +3115,6 @@ fn remote_parent_path(path: &str) -> Option<String> {
     }
     let parent = trimmed.rsplit_once('/').map(|(parent, _)| parent)?;
     Some(if parent.is_empty() { "/" } else { parent }.to_string())
-}
-
-fn fixture_project(name: &str, path: &str, project_type: ProjectType, marker: &str) -> Project {
-    let mut project = Project {
-        name: name.to_string(),
-        path: PathBuf::from(path),
-        source: ProjectSource::Local,
-        project_type,
-        has_git: false,
-        git_remote: None,
-        markers_found: vec![marker.to_string()],
-        last_modified: None,
-        search_key: String::new(),
-    };
-    project.refresh_search_key();
-    project
 }
 
 pub(crate) fn run() {

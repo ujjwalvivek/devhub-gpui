@@ -22,7 +22,6 @@ fn main() {
     let png = pixmap.encode_png().expect("encode app icon PNG");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    fs::write(out_dir.join("appicon.png"), &png).expect("write appicon.png");
     let icon_path = out_dir.join("appicon.ico");
     let mut ico = Vec::with_capacity(22 + png.len());
     ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
