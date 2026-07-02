@@ -10,6 +10,26 @@
 `config.toml`: %AppData%\Roaming\devhub-gpui\config\config.toml
 `projects.toml`: %AppData%\Local\devhub-gpui\cache\projects.toml
 
+## Remaining differences
+
+- Remote `.gitignore` behavior does not match local discovery.
+- SSH requires a POSIX/GNU remote; SFTP and PowerShell-only servers are unsupported.
+- In-flight SSH operations cannot be manually cancelled.
+
+## Good to haves (defer until later)
+
+- Per-source scan status and errors
+- Manual refresh per root or host
+- Pin/favorite projects
+- Hide/archive projects
+- SSH config parsing (`~/.ssh/config`) via `ssh_config` crate
+- Build/test command shortcuts
+- `tokei`/code statistics (defer until manually requested)
+- Global full-text search index (`grep`)
+- `tokei` (library) + `grep` hybrid JSON over SSH
+- `keyring-core` for credential storage
+- `ignore` for `.gitignore`-style pattern matching
+
 ## Status
 
 - Current stage: Standalone cross-platform release automation
