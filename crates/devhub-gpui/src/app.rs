@@ -8,11 +8,12 @@ use crate::ui::{
     window_control, workbench_message,
 };
 use devhub_core::{
-    cache_path, list_local_subdirs, list_project_tree, list_remote_subdirs, load_projects,
-    local_roots, open_project_in_zed, read_project_file, read_project_readme, save_projects,
-    scan_directories, scan_remote_host, search_project_content, sort_projects,
-    validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode, Config, DirectoryEntry,
-    FileEntry, Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
+    cache_path, list_local_subdirs, list_project_tree_cancellable, list_remote_subdirs_cancellable,
+    load_projects, local_roots, open_project_in_zed, read_project_file_cancellable,
+    read_project_readme_cancellable, save_projects, scan_directories_cancellable,
+    scan_remote_host_cancellable, search_project_content_cancellable, sort_projects,
+    validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode, CancellationToken,
+    Config, DirectoryEntry, FileEntry, Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
     filtered_project_indices, has_scan_sources, language_for_path, markdown_fenced_source,
@@ -48,6 +49,7 @@ actions!(
 
 struct DevHubLite {
     scan: ScanModel,
+    scan_cancellation: Option<CancellationToken>,
     selected: Option<usize>,
     filter_query: String,
     launch_error: Option<String>,
@@ -66,16 +68,19 @@ struct DevHubLite {
     source_picker: SourcePicker,
     picker_entries: LoadState<Vec<DirectoryEntry>>,
     picker_generation: u64,
+    picker_cancellation: Option<CancellationToken>,
     remote_name_input: Entity<InputState>,
     remote_host_input: Entity<InputState>,
     remote_path_input: Entity<InputState>,
     details_tab: DetailsTab,
     tree_state: LoadState<TreeListing>,
     tree_generation: u64,
+    tree_cancellation: Option<CancellationToken>,
     expanded_dirs: HashSet<PathBuf>,
     selected_file: Option<PathBuf>,
     file_state: LoadState<String>,
     file_generation: u64,
+    file_cancellation: Option<CancellationToken>,
     document_focused: bool,
     wrap_document: bool,
     pending_document_line: Option<usize>,
@@ -84,9 +89,11 @@ struct DevHubLite {
     search_query: String,
     search_state: LoadState<Vec<SearchHit>>,
     search_generation: u64,
+    search_cancellation: Option<CancellationToken>,
     show_hidden: bool,
     readme_state: LoadState<String>,
     readme_generation: u64,
+    readme_cancellation: Option<CancellationToken>,
     readme_preview: bool,
     tree_width_px: f32,
     dragging_split: bool,
@@ -171,6 +178,7 @@ impl DevHubLite {
 
         Self {
             scan: ScanModel::new(initial_projects),
+            scan_cancellation: None,
             selected: None,
             filter_query: String::new(),
             launch_error: (!startup_errors.is_empty()).then(|| startup_errors.join(" | ")),
@@ -189,16 +197,19 @@ impl DevHubLite {
             source_picker: SourcePicker::Closed,
             picker_entries: LoadState::Idle,
             picker_generation: 0,
+            picker_cancellation: None,
             remote_name_input,
             remote_host_input,
             remote_path_input,
             details_tab: DetailsTab::Overview,
             tree_state: LoadState::Idle,
             tree_generation: 0,
+            tree_cancellation: None,
             expanded_dirs: HashSet::new(),
             selected_file: None,
             file_state: LoadState::Idle,
             file_generation: 0,
+            file_cancellation: None,
             document_focused: false,
             wrap_document: false,
             pending_document_line: None,
@@ -207,9 +218,11 @@ impl DevHubLite {
             search_query: String::new(),
             search_state: LoadState::Idle,
             search_generation: 0,
+            search_cancellation: None,
             show_hidden: false,
             readme_state: LoadState::Idle,
             readme_generation: 0,
+            readme_cancellation: None,
             readme_preview: true,
             tree_width_px: 130.0,
             dragging_split: false,
@@ -222,6 +235,10 @@ impl DevHubLite {
     }
 
     fn reset_workspace(&mut self, cx: &mut Context<Self>) {
+        Self::cancel_token(&mut self.tree_cancellation);
+        Self::cancel_token(&mut self.file_cancellation);
+        Self::cancel_token(&mut self.search_cancellation);
+        Self::cancel_token(&mut self.readme_cancellation);
         self.details_tab = DetailsTab::Overview;
         self.tree_generation = self.tree_generation.wrapping_add(1);
         self.tree_state = LoadState::Idle;
@@ -237,6 +254,58 @@ impl DevHubLite {
         self.search_state = LoadState::Idle;
         self.readme_generation = self.readme_generation.wrapping_add(1);
         self.readme_state = LoadState::Idle;
+        cx.notify();
+    }
+
+    fn cancel_token(token: &mut Option<CancellationToken>) {
+        if let Some(token) = token.take() {
+            token.cancel();
+        }
+    }
+
+    fn has_active_operations(&self) -> bool {
+        self.scan_cancellation.is_some()
+            || self.picker_cancellation.is_some()
+            || self.tree_cancellation.is_some()
+            || self.file_cancellation.is_some()
+            || self.search_cancellation.is_some()
+            || self.readme_cancellation.is_some()
+    }
+
+    fn stop_active_operations(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let scan_was_active = self.scan_cancellation.is_some();
+        Self::cancel_token(&mut self.scan_cancellation);
+        Self::cancel_token(&mut self.picker_cancellation);
+        Self::cancel_token(&mut self.tree_cancellation);
+        Self::cancel_token(&mut self.file_cancellation);
+        Self::cancel_token(&mut self.search_cancellation);
+        Self::cancel_token(&mut self.readme_cancellation);
+
+        if scan_was_active {
+            self.scan.cancel();
+        }
+        self.picker_generation = self.picker_generation.wrapping_add(1);
+        self.tree_generation = self.tree_generation.wrapping_add(1);
+        self.file_generation = self.file_generation.wrapping_add(1);
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.readme_generation = self.readme_generation.wrapping_add(1);
+
+        if matches!(self.picker_entries, LoadState::Loading) {
+            self.picker_entries = LoadState::Idle;
+        }
+        if matches!(self.tree_state, LoadState::Loading) {
+            self.tree_state = LoadState::Idle;
+        }
+        if matches!(self.file_state, LoadState::Loading) {
+            self.file_state = LoadState::Idle;
+        }
+        if matches!(self.search_state, LoadState::Loading) {
+            self.search_state = LoadState::Idle;
+        }
+        if matches!(self.readme_state, LoadState::Loading) {
+            self.readme_state = LoadState::Idle;
+        }
+        self.show_copy_feedback("CANCELLED", cx);
         cx.notify();
     }
 
@@ -266,6 +335,9 @@ impl DevHubLite {
 
         let generation = self.scan.begin();
         let max_depth = self.config.max_depth;
+        Self::cancel_token(&mut self.scan_cancellation);
+        let cancellation = CancellationToken::new();
+        self.scan_cancellation = Some(cancellation.clone());
 
         self.clear_filter(window, cx);
         self.selected = None;
@@ -276,9 +348,11 @@ impl DevHubLite {
         let scan_task = cx.background_executor().spawn(async move {
             let (available_roots, mut errors) = partition_local_scan_roots(roots);
             let mut successful_sources = usize::from(!available_roots.is_empty());
-            let mut projects = scan_directories(&available_roots, max_depth);
+            let mut projects =
+                scan_directories_cancellable(&available_roots, max_depth, &cancellation)?;
             for host in remote_hosts {
-                match scan_remote_host(&host) {
+                cancellation.check()?;
+                match scan_remote_host_cancellable(&host, &cancellation) {
                     Ok(mut remote_projects) => {
                         successful_sources += 1;
                         projects.append(&mut remote_projects);
@@ -301,6 +375,7 @@ impl DevHubLite {
                     Err(error) => (Err(error), Vec::new()),
                 };
                 if this.scan.apply_result(generation, result) {
+                    this.scan_cancellation = None;
                     this.selected = None;
                     this.launch_error =
                         (!remote_errors.is_empty()).then(|| remote_errors.join(" | "));
@@ -535,6 +610,7 @@ impl DevHubLite {
     }
 
     fn load_local_picker(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        Self::cancel_token(&mut self.picker_cancellation);
         self.picker_generation = self.picker_generation.wrapping_add(1);
         let generation = self.picker_generation;
         self.source_picker = SourcePicker::Local {
@@ -564,6 +640,7 @@ impl DevHubLite {
     }
 
     fn show_local_roots(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        Self::cancel_token(&mut self.picker_cancellation);
         self.picker_generation = self.picker_generation.wrapping_add(1);
         self.source_picker = SourcePicker::Local {
             current: PathBuf::new(),
@@ -659,17 +736,21 @@ impl DevHubLite {
         };
         self.picker_entries = LoadState::Loading;
         self.launch_error = None;
+        Self::cancel_token(&mut self.picker_cancellation);
+        let cancellation = CancellationToken::new();
+        self.picker_cancellation = Some(cancellation.clone());
         cx.notify();
 
         let task = cx
             .background_executor()
-            .spawn(async move { list_remote_subdirs(&host, &path) });
+            .spawn(async move { list_remote_subdirs_cancellable(&host, &path, &cancellation) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 if this.picker_generation != generation {
                     return;
                 }
+                this.picker_cancellation = None;
                 this.picker_entries = match result {
                     Ok(entries) if entries.is_empty() => LoadState::Empty,
                     Ok(entries) => LoadState::Loaded(entries),
@@ -690,6 +771,7 @@ impl DevHubLite {
     }
 
     fn close_source_picker(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        Self::cancel_token(&mut self.picker_cancellation);
         self.picker_generation = self.picker_generation.wrapping_add(1);
         self.source_picker = SourcePicker::Closed;
         self.picker_entries = LoadState::Idle;
@@ -697,6 +779,7 @@ impl DevHubLite {
     }
 
     fn add_current_source(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        Self::cancel_token(&mut self.picker_cancellation);
         match &self.source_picker {
             SourcePicker::Local { current } if !current.as_os_str().is_empty() => {
                 if !self.pending_scan_dirs.contains(current) {
@@ -1549,13 +1632,16 @@ impl DevHubLite {
         let show_hidden = self.show_hidden;
         self.tree_generation = self.tree_generation.wrapping_add(1);
         let generation = self.tree_generation;
+        Self::cancel_token(&mut self.tree_cancellation);
+        let cancellation = CancellationToken::new();
+        self.tree_cancellation = Some(cancellation.clone());
         self.tree_state = LoadState::Loading;
         cx.notify();
 
         let request_project = project.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { list_project_tree(&project, 10, show_hidden) });
+        let task = cx.background_executor().spawn(async move {
+            list_project_tree_cancellable(&project, 10, show_hidden, &cancellation)
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1566,6 +1652,7 @@ impl DevHubLite {
                 {
                     return;
                 }
+                this.tree_cancellation = None;
 
                 this.tree_state = match result {
                     Ok(listing) if listing.entries.is_empty() => LoadState::Empty,
@@ -1590,13 +1677,16 @@ impl DevHubLite {
         };
         self.readme_generation = self.readme_generation.wrapping_add(1);
         let generation = self.readme_generation;
+        Self::cancel_token(&mut self.readme_cancellation);
+        let cancellation = CancellationToken::new();
+        self.readme_cancellation = Some(cancellation.clone());
         self.readme_state = LoadState::Loading;
         cx.notify();
 
         let request_project = project.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { read_project_readme(&project) });
+            .spawn(async move { read_project_readme_cancellable(&project, &cancellation) });
         cx.spawn(async move |this, cx| {
             let content = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1604,6 +1694,7 @@ impl DevHubLite {
                 if this.readme_generation != generation || !project_matches {
                     return;
                 }
+                this.readme_cancellation = None;
                 this.readme_state = match content {
                     Ok(Some(content)) if content.trim().is_empty() => LoadState::Empty,
                     Ok(Some(content)) => LoadState::Loaded(content),
@@ -1654,6 +1745,9 @@ impl DevHubLite {
         };
         self.file_generation = self.file_generation.wrapping_add(1);
         let generation = self.file_generation;
+        Self::cancel_token(&mut self.file_cancellation);
+        let cancellation = CancellationToken::new();
+        self.file_cancellation = Some(cancellation.clone());
         self.file_state = LoadState::Loading;
         self.document_focused = true;
         self.copy_feedback = None;
@@ -1663,7 +1757,7 @@ impl DevHubLite {
         let request_project = project.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { read_project_file(&project, &path) });
+            .spawn(async move { read_project_file_cancellable(&project, &path, &cancellation) });
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1674,6 +1768,7 @@ impl DevHubLite {
                 {
                     return;
                 }
+                this.file_cancellation = None;
                 this.file_state = match result {
                     Ok(content) if content.is_empty() => LoadState::Empty,
                     Ok(content) => LoadState::Loaded(content),
@@ -1698,14 +1793,17 @@ impl DevHubLite {
 
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
+        Self::cancel_token(&mut self.search_cancellation);
+        let cancellation = CancellationToken::new();
+        self.search_cancellation = Some(cancellation.clone());
         self.search_state = LoadState::Loading;
         cx.notify();
 
         let request_project = project.clone();
         let request_query = query.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { search_project_content(&project, &query) });
+        let task = cx.background_executor().spawn(async move {
+            search_project_content_cancellable(&project, &query, &cancellation)
+        });
 
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1717,6 +1815,7 @@ impl DevHubLite {
                 {
                     return;
                 }
+                this.search_cancellation = None;
                 this.search_state = match result {
                     Ok(hits) if hits.is_empty() => LoadState::Empty,
                     Ok(hits) => LoadState::Loaded(hits),
@@ -2643,6 +2742,7 @@ impl Render for DevHubLite {
         };
         let scan_status = scan_status(&self.scan.state, &self.scan_root);
         let status_color = scan_state_color(theme, &self.scan.state);
+        let has_active_operations = self.has_active_operations();
         let total_count = self.scan.projects.len();
         let visible_count = filtered_indices.len();
         let filter_active = !self.filter_query.is_empty();
@@ -2913,6 +3013,28 @@ impl Render for DevHubLite {
                             .child(scan_button_label)
                             .on_click(cx.listener(Self::start_scan)),
                     )
+                    .when(has_active_operations, |titlebar| {
+                        titlebar.child(
+                            div()
+                                .id("stop-active-operations")
+                                .h(px(23.0))
+                                .ml_1()
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .border_1()
+                                .border_color(theme.error)
+                                .bg(theme.error.opacity(0.12))
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.0))
+                                .text_color(theme.error)
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(theme.error.opacity(0.22)))
+                                .active(move |style| style.bg(theme.error.opacity(0.3)))
+                                .child("Stop")
+                                .on_click(cx.listener(Self::stop_active_operations)),
+                        )
+                    })
                     .child(
                         div()
                             .h_full()

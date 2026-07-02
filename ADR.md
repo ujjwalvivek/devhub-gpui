@@ -8,23 +8,22 @@
 ## Config Paths
 
 `config.toml`: %AppData%\Roaming\devhub-gpui\config\config.toml
+
 `projects.toml`: %AppData%\Local\devhub-gpui\cache\projects.toml
 
 ## Remaining differences
 
-- Remote `.gitignore` behavior does not match local discovery.
 - SSH requires a POSIX/GNU remote; SFTP and PowerShell-only servers are unsupported.
-- In-flight SSH operations cannot be manually cancelled.
 
 ## Good to haves (defer until later)
 
-- Per-source scan status and errors
-- Manual refresh per root or host
 - Pin/favorite projects
 - Hide/archive projects
+- `tokei`/code statistics (defer until manually requested)
+- Per-source scan status and errors
+- Manual refresh per root or host
 - SSH config parsing (`~/.ssh/config`) via `ssh_config` crate
 - Build/test command shortcuts
-- `tokei`/code statistics (defer until manually requested)
 - Global full-text search index (`grep`)
 - `tokei` (library) + `grep` hybrid JSON over SSH
 - `keyring-core` for credential storage
@@ -155,7 +154,7 @@
   passes with 55 tests, warning-denied clippy, thin-LTO release build, and a
   direct PE-header check confirming subsystem 2 (`Windows GUI`). The first tag
   remains the required hosted-run validation of the GitHub Actions matrix.
-- `RELEASE.md` now provides the v1.0.0 download map, portable installation,
+- `RELEASE.md` now provides the v1.0.1 download map, portable installation,
   first-run, SSH, checksum, upgrade, and rollback instructions. It ships inside
   every archive and is used verbatim as the tagged GitHub release body.
 - Source application: `[REDACTED]\devhub` (read-only)
@@ -1572,7 +1571,7 @@ Versions to record during Phase 1:
 
 ## Next action
 
-The v1.0.0 standalone release is shipped and verified. The immediate task is
+The v1.0.1 standalone release is shipped and verified. The immediate task is
 the website update in `[REDACTED]\devhub\web`:
 
 1. Repoint primary release/badge/chart fetches from `ujjwalvivek/devhub` to

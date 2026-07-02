@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::CancellationToken;
+
 const MARKERS: &[(&str, ProjectType)] = &[
     ("Cargo.toml", ProjectType::Rust),
     ("package.json", ProjectType::Node),
@@ -127,17 +129,34 @@ impl Project {
 }
 
 pub fn scan_directories(dirs: &[PathBuf], max_depth: usize) -> Vec<Project> {
+    scan_directories_inner(dirs, max_depth, None).unwrap_or_default()
+}
+
+pub fn scan_directories_cancellable(
+    dirs: &[PathBuf],
+    max_depth: usize,
+    cancellation: &CancellationToken,
+) -> Result<Vec<Project>, String> {
+    scan_directories_inner(dirs, max_depth, Some(cancellation))
+}
+
+fn scan_directories_inner(
+    dirs: &[PathBuf],
+    max_depth: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<Project>, String> {
     let mut projects = Vec::new();
     let mut seen = HashSet::new();
 
     for dir in dirs {
+        check_cancelled(cancellation)?;
         if dir.exists() {
-            scan_root(dir, max_depth, &mut projects, &mut seen);
+            scan_root(dir, max_depth, &mut projects, &mut seen, cancellation)?;
         }
     }
 
     sort_projects(&mut projects);
-    projects
+    Ok(projects)
 }
 
 pub fn sort_projects(projects: &mut [Project]) {
@@ -155,10 +174,12 @@ fn scan_root(
     max_depth: usize,
     projects: &mut Vec<Project>,
     seen: &mut HashSet<PathBuf>,
-) {
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), String> {
+    check_cancelled(cancellation)?;
     if let Some(project) = detect_project(root) {
         insert_project(project, projects, seen);
-        return;
+        return Ok(());
     }
 
     let project_count_before_children = projects.len();
@@ -170,19 +191,21 @@ fn scan_root(
         .build();
 
     for entry in walker.flatten() {
+        check_cancelled(cancellation)?;
         let path = entry.path();
         if path.is_dir() && path != root {
-            if let Some(project) = detect_project_tree(path, max_depth) {
+            if let Some(project) = detect_project_tree(path, max_depth, cancellation)? {
                 insert_project(project, projects, seen);
             }
         }
     }
 
     if projects.len() == project_count_before_children {
-        let source_project = detect_project_tree(root, max_depth)
+        let source_project = detect_project_tree(root, max_depth, cancellation)?
             .unwrap_or_else(|| build_local_project(root, ProjectType::Unknown, Vec::new()));
         insert_project(source_project, projects, seen);
     }
+    Ok(())
 }
 
 fn detect_project(dir: &Path) -> Option<Project> {
@@ -193,7 +216,11 @@ fn detect_project(dir: &Path) -> Option<Project> {
     (!markers_found.is_empty()).then(|| build_local_project(dir, project_type, markers_found))
 }
 
-fn detect_project_tree(root: &Path, max_depth: usize) -> Option<Project> {
+fn detect_project_tree(
+    root: &Path,
+    max_depth: usize,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Option<Project>, String> {
     let mut markers_found = Vec::new();
     let mut project_type = ProjectType::Unknown;
     let walker = ignore::WalkBuilder::new(root)
@@ -204,13 +231,18 @@ fn detect_project_tree(root: &Path, max_depth: usize) -> Option<Project> {
         .build();
 
     for entry in walker.flatten() {
+        check_cancelled(cancellation)?;
         let path = entry.path();
         if path.is_dir() {
             scan_markers_in_dir(path, &mut markers_found, &mut project_type);
         }
     }
 
-    (!markers_found.is_empty()).then(|| build_local_project(root, project_type, markers_found))
+    Ok((!markers_found.is_empty()).then(|| build_local_project(root, project_type, markers_found)))
+}
+
+fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<(), String> {
+    cancellation.map_or(Ok(()), CancellationToken::check)
 }
 
 fn build_local_project(
@@ -415,6 +447,17 @@ mod tests {
         ));
 
         assert!(scan_directories(&[missing], 2).is_empty());
+    }
+
+    #[test]
+    fn cancelled_scan_stops_before_filesystem_discovery() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error =
+            scan_directories_cancellable(&[PathBuf::from("missing")], 2, &token).unwrap_err();
+
+        assert_eq!(error, crate::OPERATION_CANCELLED);
     }
 
     #[test]

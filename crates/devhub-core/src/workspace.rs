@@ -2,7 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::discovery::{Project, ProjectSource};
-use crate::remote::{read_remote_file, read_remote_readme, search_remote_content, DirectoryEntry};
+use crate::remote::{
+    read_remote_file, read_remote_file_cancellable, read_remote_readme,
+    read_remote_readme_cancellable, search_remote_content, search_remote_content_cancellable,
+    DirectoryEntry,
+};
+use crate::CancellationToken;
 
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_TREE_ENTRIES: usize = 500;
@@ -86,11 +91,47 @@ pub fn list_project_tree(
     }
 }
 
+pub fn list_project_tree_cancellable(
+    project: &Project,
+    max_depth: usize,
+    show_hidden: bool,
+    cancellation: &CancellationToken,
+) -> Result<TreeListing, String> {
+    match &project.source {
+        ProjectSource::Local => {
+            list_tree_cancellable(&project.path, max_depth, show_hidden, cancellation)
+        }
+        ProjectSource::Remote { host, .. } => crate::remote::list_remote_tree_cancellable(
+            host,
+            &project.path,
+            max_depth,
+            show_hidden,
+            cancellation,
+        ),
+    }
+}
+
 pub fn read_project_file(project: &Project, path: &Path) -> Result<String, String> {
     match &project.source {
         ProjectSource::Local => read_file(path),
         ProjectSource::Remote { host, .. } => read_remote_file(host, path),
     }
+}
+
+pub fn read_project_file_cancellable(
+    project: &Project,
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<String, String> {
+    cancellation.check()?;
+    let result = match &project.source {
+        ProjectSource::Local => read_file(path),
+        ProjectSource::Remote { host, .. } => {
+            read_remote_file_cancellable(host, path, cancellation)
+        }
+    };
+    cancellation.check()?;
+    result
 }
 
 pub fn read_project_readme(project: &Project) -> Result<Option<String>, String> {
@@ -100,6 +141,21 @@ pub fn read_project_readme(project: &Project) -> Result<Option<String>, String> 
     }
 }
 
+pub fn read_project_readme_cancellable(
+    project: &Project,
+    cancellation: &CancellationToken,
+) -> Result<Option<String>, String> {
+    cancellation.check()?;
+    let result = match &project.source {
+        ProjectSource::Local => Ok(read_readme(&project.path)),
+        ProjectSource::Remote { host, .. } => {
+            read_remote_readme_cancellable(host, &project.path, cancellation)
+        }
+    };
+    cancellation.check()?;
+    result
+}
+
 pub fn search_project_content(project: &Project, query: &str) -> Result<Vec<SearchHit>, String> {
     match &project.source {
         ProjectSource::Local => Ok(search_content(&project.path, query)),
@@ -107,7 +163,41 @@ pub fn search_project_content(project: &Project, query: &str) -> Result<Vec<Sear
     }
 }
 
+pub fn search_project_content_cancellable(
+    project: &Project,
+    query: &str,
+    cancellation: &CancellationToken,
+) -> Result<Vec<SearchHit>, String> {
+    match &project.source {
+        ProjectSource::Local => search_content_cancellable(&project.path, query, cancellation),
+        ProjectSource::Remote { host, .. } => {
+            search_remote_content_cancellable(host, &project.path, query, cancellation)
+        }
+    }
+}
+
 pub fn list_tree(root: &Path, max_depth: usize, show_hidden: bool) -> Result<TreeListing, String> {
+    list_tree_inner(root, max_depth, show_hidden, None)
+}
+
+pub fn list_tree_cancellable(
+    root: &Path,
+    max_depth: usize,
+    show_hidden: bool,
+    cancellation: &CancellationToken,
+) -> Result<TreeListing, String> {
+    list_tree_inner(root, max_depth, show_hidden, Some(cancellation))
+}
+
+fn list_tree_inner(
+    root: &Path,
+    max_depth: usize,
+    show_hidden: bool,
+    cancellation: Option<&CancellationToken>,
+) -> Result<TreeListing, String> {
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
     let metadata =
         std::fs::metadata(root).map_err(|error| format!("{}: {error}", root.display()))?;
     if !metadata.is_dir() {
@@ -128,6 +218,9 @@ pub fn list_tree(root: &Path, max_depth: usize, show_hidden: bool) -> Result<Tre
         .build();
 
     for result in walker {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         let entry = match result {
             Ok(entry) => entry,
             Err(error) => {
@@ -263,9 +356,25 @@ pub fn read_readme(dir: &Path) -> Option<String> {
 }
 
 pub fn search_content(root: &Path, query: &str) -> Vec<SearchHit> {
+    search_content_inner(root, query, None).unwrap_or_default()
+}
+
+pub fn search_content_cancellable(
+    root: &Path,
+    query: &str,
+    cancellation: &CancellationToken,
+) -> Result<Vec<SearchHit>, String> {
+    search_content_inner(root, query, Some(cancellation))
+}
+
+fn search_content_inner(
+    root: &Path,
+    query: &str,
+    cancellation: Option<&CancellationToken>,
+) -> Result<Vec<SearchHit>, String> {
     let query = query.trim();
     if query.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let query_lower = query.to_lowercase();
@@ -278,6 +387,9 @@ pub fn search_content(root: &Path, query: &str) -> Vec<SearchHit> {
         .build();
 
     for entry in walker.flatten() {
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         if hits.len() >= MAX_SEARCH_HITS {
             break;
         }
@@ -292,6 +404,9 @@ pub fn search_content(root: &Path, query: &str) -> Vec<SearchHit> {
         };
         let content = String::from_utf8_lossy(&bytes);
         for (line_idx, line) in content.lines().enumerate() {
+            if let Some(cancellation) = cancellation {
+                cancellation.check()?;
+            }
             if line.to_lowercase().contains(&query_lower) {
                 hits.push(SearchHit {
                     path: path.to_path_buf(),
@@ -305,7 +420,7 @@ pub fn search_content(root: &Path, query: &str) -> Vec<SearchHit> {
         }
     }
 
-    hits
+    Ok(hits)
 }
 
 fn is_skipped_path(path: &Path) -> bool {

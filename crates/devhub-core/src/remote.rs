@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::config::{normalize_ssh_host, RemoteHostConfig};
 use crate::discovery::{sort_projects, Project, ProjectSource, ProjectType};
 use crate::workspace::{FileEntry, SearchHit, TreeListing};
+use crate::CancellationToken;
 
 const SSH_CONNECT_TIMEOUT_SECONDS: u64 = 8;
 const SSH_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -16,6 +17,27 @@ const MAX_TREE_ENTRIES: usize = 500;
 const MAX_SEARCH_HITS: usize = 200;
 const MAX_PREVIEW_CHARS: usize = 240;
 const MAX_REMOTE_PROJECTS: usize = 1_000;
+
+const REMOTE_IGNORE_FUNCTION: &str = r#"is_git_ignored() {
+    candidate="$1"
+    command -v git >/dev/null 2>&1 || return 1
+    cursor="$(dirname "$candidate")"
+    while [ "$cursor" != "/" ] && [ -n "$cursor" ]; do
+        if [ -e "$cursor/.git" ]; then
+            case "$candidate" in
+                "$cursor"/*) relative=${candidate#"$cursor"/} ;;
+                *) return 1 ;;
+            esac
+            git -C "$cursor" check-ignore -q -- "$relative" 2>/dev/null
+            return $?
+        fi
+        parent="$(dirname "$cursor")"
+        [ "$parent" = "$cursor" ] && break
+        cursor="$parent"
+    done
+    return 1
+}
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryEntry {
@@ -58,7 +80,19 @@ pub fn validate_remote_path(raw: &str) -> Result<String, String> {
 }
 
 pub fn check_ssh_connection(host: &str) -> Result<(), String> {
-    let output = run_ssh_script(host, "printf devhub-ssh-ok\n", Duration::from_secs(12))?;
+    check_ssh_connection_cancellable(host, &CancellationToken::new())
+}
+
+pub fn check_ssh_connection_cancellable(
+    host: &str,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    let output = run_ssh_script(
+        host,
+        "printf devhub-ssh-ok\n",
+        Duration::from_secs(12),
+        cancellation,
+    )?;
     if output.trim() == "devhub-ssh-ok" {
         Ok(())
     } else {
@@ -126,12 +160,20 @@ fn zed_windows_candidates() -> Vec<PathBuf> {
 }
 
 pub fn list_remote_subdirs(host: &str, path: &str) -> Result<Vec<DirectoryEntry>, String> {
+    list_remote_subdirs_cancellable(host, path, &CancellationToken::new())
+}
+
+pub fn list_remote_subdirs_cancellable(
+    host: &str,
+    path: &str,
+    cancellation: &CancellationToken,
+) -> Result<Vec<DirectoryEntry>, String> {
     let path = validate_remote_path(path)?;
     let script = format!(
         "root={}\nfind \"$root\" -mindepth 1 -maxdepth 1 -type d -printf '%f\\t%p\\n' 2>/dev/null | head -n 500\n",
         shell_quote(&path)
     );
-    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT)?;
+    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     let mut entries = output
         .lines()
         .filter_map(|line| {
@@ -147,6 +189,13 @@ pub fn list_remote_subdirs(host: &str, path: &str) -> Result<Vec<DirectoryEntry>
 }
 
 pub fn scan_remote_host(config: &RemoteHostConfig) -> Result<Vec<Project>, String> {
+    scan_remote_host_cancellable(config, &CancellationToken::new())
+}
+
+pub fn scan_remote_host_cancellable(
+    config: &RemoteHostConfig,
+    cancellation: &CancellationToken,
+) -> Result<Vec<Project>, String> {
     let host = validate_ssh_host(&config.host)?;
     let roots = config
         .roots
@@ -163,7 +212,8 @@ pub fn scan_remote_host(config: &RemoteHostConfig) -> Result<Vec<Project>, Strin
         .collect::<Vec<_>>()
         .join(" ");
     let script = format!(
-        r#"emit_project() {{
+        r#"{ignore}
+emit_project() {{
     d="$1"
     markers=""
     ptype="Unknown"
@@ -197,13 +247,16 @@ pub fn scan_remote_host(config: &RemoteHostConfig) -> Result<Vec<Project>, Strin
 for root in {roots}; do
     [ -d "$root" ] || continue
     find "$root" -maxdepth {depth} \( -name .git -o -name node_modules -o -name target -o -name build -o -name dist -o -name .next -o -name vendor -o -name __pycache__ \) -prune -o -type d -print 2>/dev/null
-done | head -n 5000 | while IFS= read -r dir; do emit_project "$dir"; done | head -n {limit}
+done | head -n 5000 | while IFS= read -r dir; do
+    is_git_ignored "$dir" || emit_project "$dir"
+done | head -n {limit}
 "#,
+        ignore = REMOTE_IGNORE_FUNCTION,
         depth = config.max_depth.clamp(1, 20),
         limit = MAX_REMOTE_PROJECTS,
     );
 
-    let output = run_ssh_script(&host, &script, SSH_OPERATION_TIMEOUT)?;
+    let output = run_ssh_script(&host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     let mut projects = output
         .lines()
         .filter_map(|line| parse_remote_project(line, config, &host))
@@ -218,6 +271,22 @@ pub fn list_remote_tree(
     max_depth: usize,
     show_hidden: bool,
 ) -> Result<TreeListing, String> {
+    list_remote_tree_cancellable(
+        host,
+        root,
+        max_depth,
+        show_hidden,
+        &CancellationToken::new(),
+    )
+}
+
+pub fn list_remote_tree_cancellable(
+    host: &str,
+    root: &Path,
+    max_depth: usize,
+    show_hidden: bool,
+    cancellation: &CancellationToken,
+) -> Result<TreeListing, String> {
     let root = validate_remote_path(&root.to_string_lossy())?;
     let hidden_prune = if show_hidden {
         String::new()
@@ -225,14 +294,18 @@ pub fn list_remote_tree(
         " -o -name '.*'".to_string()
     };
     let script = format!(
-        r#"root={root}
-find "$root" -mindepth 1 -maxdepth {depth} \( -name .git -o -name node_modules -o -name target -o -name build -o -name dist -o -name .next -o -name vendor -o -name __pycache__{hidden_prune} \) -prune -o \( -type d -printf 'd\t%p\n' -o -type f -printf 'f\t%p\n' \) 2>/dev/null | head -n {limit}
+        r#"{ignore}
+root={root}
+find "$root" -mindepth 1 -maxdepth {depth} \( -name .git -o -name node_modules -o -name target -o -name build -o -name dist -o -name .next -o -name vendor -o -name __pycache__{hidden_prune} \) -prune -o \( -type d -printf 'd\t%p\n' -o -type f -printf 'f\t%p\n' \) 2>/dev/null | while IFS="$(printf '\t')" read -r kind path; do
+    is_git_ignored "$path" || printf '%s\t%s\n' "$kind" "$path"
+done | head -n {limit}
 "#,
+        ignore = REMOTE_IGNORE_FUNCTION,
         root = shell_quote(&root),
         depth = max_depth.clamp(1, 20),
         limit = MAX_TREE_ENTRIES + 1,
     );
-    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT)?;
+    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     let entries = output
         .lines()
         .take(MAX_TREE_ENTRIES)
@@ -246,6 +319,14 @@ find "$root" -mindepth 1 -maxdepth {depth} \( -name .git -o -name node_modules -
 }
 
 pub fn read_remote_file(host: &str, path: &Path) -> Result<String, String> {
+    read_remote_file_cancellable(host, path, &CancellationToken::new())
+}
+
+pub fn read_remote_file_cancellable(
+    host: &str,
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<String, String> {
     let path = validate_remote_path(&path.to_string_lossy())?;
     let script = format!(
         r#"path={path}
@@ -258,10 +339,20 @@ cat -- "$path"
         limit = MAX_FILE_BYTES,
         kib = MAX_FILE_BYTES / 1024,
     );
-    decode_remote_text(run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT)?.into_bytes())
+    decode_remote_text(
+        run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?.into_bytes(),
+    )
 }
 
 pub fn read_remote_readme(host: &str, root: &Path) -> Result<Option<String>, String> {
+    read_remote_readme_cancellable(host, root, &CancellationToken::new())
+}
+
+pub fn read_remote_readme_cancellable(
+    host: &str,
+    root: &Path,
+    cancellation: &CancellationToken,
+) -> Result<Option<String>, String> {
     let root = validate_remote_path(&root.to_string_lossy())?;
     let script = format!(
         r#"root={root}
@@ -278,7 +369,7 @@ done
         root = shell_quote(&root),
         limit = MAX_FILE_BYTES,
     );
-    let bytes = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT)?.into_bytes();
+    let bytes = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?.into_bytes();
     if bytes.is_empty() {
         Ok(None)
     } else {
@@ -291,6 +382,15 @@ pub fn search_remote_content(
     root: &Path,
     query: &str,
 ) -> Result<Vec<SearchHit>, String> {
+    search_remote_content_cancellable(host, root, query, &CancellationToken::new())
+}
+
+pub fn search_remote_content_cancellable(
+    host: &str,
+    root: &Path,
+    query: &str,
+    cancellation: &CancellationToken,
+) -> Result<Vec<SearchHit>, String> {
     let root = validate_remote_path(&root.to_string_lossy())?;
     let query = query.trim();
     if query.is_empty() {
@@ -300,19 +400,30 @@ pub fn search_remote_content(
         return Err("search query cannot contain line breaks".into());
     }
     let script = format!(
-        r#"root={root}
+        r#"{ignore}
+root={root}
 query={query}
-grep -RInF --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target --exclude-dir=build --exclude-dir=dist --exclude-dir=.next --exclude-dir=vendor --exclude-dir=__pycache__ --binary-files=without-match -- "$query" "$root" 2>/dev/null | head -n {limit} || true
+grep -RInF --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target --exclude-dir=build --exclude-dir=dist --exclude-dir=.next --exclude-dir=vendor --exclude-dir=__pycache__ --binary-files=without-match -- "$query" "$root" 2>/dev/null | while IFS= read -r match; do
+    path=${{match%%:*}}
+    is_git_ignored "$path" || printf '%s\n' "$match"
+done | head -n {limit} || true
 "#,
+        ignore = REMOTE_IGNORE_FUNCTION,
         root = shell_quote(&root),
         query = shell_quote(query),
         limit = MAX_SEARCH_HITS,
     );
-    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT)?;
+    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     Ok(output.lines().filter_map(parse_grep_hit).collect())
 }
 
-fn run_ssh_script(host: &str, script: &str, timeout: Duration) -> Result<String, String> {
+fn run_ssh_script(
+    host: &str,
+    script: &str,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<String, String> {
+    cancellation.check()?;
     let host = validate_ssh_host(host)?;
     let mut child = Command::new("ssh")
         .arg("-T")
@@ -342,6 +453,11 @@ fn run_ssh_script(host: &str, script: &str, timeout: Duration) -> Result<String,
 
     let started = Instant::now();
     loop {
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(crate::OPERATION_CANCELLED.into());
+        }
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() < timeout => {
@@ -628,5 +744,29 @@ mod tests {
             zed_ssh_uri(&port_project).unwrap(),
             "ssh://dev@example.com:2222/srv/my%20project/%23demo"
         );
+    }
+
+    #[test]
+    fn cancelled_ssh_operation_returns_before_spawning_a_process() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = run_ssh_script(
+            "unreachable.invalid",
+            "exit 0",
+            Duration::from_secs(1),
+            &token,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, crate::OPERATION_CANCELLED);
+    }
+
+    #[test]
+    fn remote_ignore_filter_uses_git_check_ignore_and_handles_nested_paths() {
+        assert!(REMOTE_IGNORE_FUNCTION.contains("git -C \"$cursor\" check-ignore"));
+        assert!(REMOTE_IGNORE_FUNCTION.contains("relative=${candidate#\"$cursor\"/}"));
+        assert!(REMOTE_IGNORE_FUNCTION.contains("command -v git"));
+        assert!(REMOTE_IGNORE_FUNCTION.contains("cursor=\"$(dirname \"$candidate\")\""));
     }
 }

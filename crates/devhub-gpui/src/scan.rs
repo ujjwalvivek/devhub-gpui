@@ -73,6 +73,17 @@ impl ScanModel {
         }
         true
     }
+
+    pub fn cancel(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.state = if self.projects.is_empty() {
+            ScanState::Idle
+        } else {
+            ScanState::Loaded {
+                count: self.projects.len(),
+            }
+        };
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +157,17 @@ mod tests {
         assert_eq!(next_selection(Some(8), 0), None);
         assert_eq!(previous_selection(Some(8), 3), Some(1));
         assert_eq!(next_selection(Some(8), 3), Some(2));
+    }
+
+    #[test]
+    fn cancellation_preserves_last_known_good_projects_and_rejects_result() {
+        let mut scan = ScanModel::new(vec![project()]);
+        let generation = scan.begin();
+
+        scan.cancel();
+
+        assert_eq!(scan.state, ScanState::Loaded { count: 1 });
+        assert_eq!(scan.projects.len(), 1);
+        assert!(!scan.apply_result(generation, Ok(Vec::new())));
     }
 }
