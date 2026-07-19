@@ -21,26 +21,69 @@ pub fn load_projects() -> Result<Option<Vec<Project>>, String> {
 }
 
 fn load_projects_from_path(path: &std::path::Path) -> Result<Option<Vec<Project>>, String> {
-    if !path.exists() {
+    let candidates = crate::persistence::read_candidates(path)?;
+    if candidates.is_empty() {
         return Ok(None);
     }
 
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let cache: ProjectCache =
-        toml::from_str(&raw).map_err(|error| format!("parsing {}: {error}", path.display()))?;
+    let live_snapshot = candidates
+        .first()
+        .filter(|candidate| candidate.kind == crate::persistence::CandidateKind::Live)
+        .and_then(|candidate| candidate.contents.as_ref().ok())
+        .cloned();
+    let mut parse_errors = Vec::new();
+    for candidate in candidates {
+        let contents = match candidate.contents {
+            Ok(contents) => contents,
+            Err(error) if candidate.kind == crate::persistence::CandidateKind::Live => {
+                return Err(error);
+            }
+            Err(error) => {
+                parse_errors.push(error);
+                continue;
+            }
+        };
+        let cache: ProjectCache = match toml::from_str(&contents) {
+            Ok(cache) => cache,
+            Err(error) => {
+                parse_errors.push(format!(
+                    "parsing {} {}: {error}",
+                    candidate.kind.label(),
+                    path.display()
+                ));
+                continue;
+            }
+        };
 
-    if cache.version != CACHE_VERSION {
-        return Ok(None);
+        if cache.version != CACHE_VERSION {
+            if candidate.kind == crate::persistence::CandidateKind::Live {
+                return Ok(None);
+            }
+            continue;
+        }
+
+        if candidate.kind != crate::persistence::CandidateKind::Live {
+            crate::persistence::restore_recovered(
+                path,
+                live_snapshot.as_deref(),
+                contents.as_bytes(),
+            )?;
+        }
+
+        let mut projects = cache.projects;
+        for project in &mut projects {
+            project.refresh_search_key();
+        }
+        crate::sort_projects(&mut projects);
+
+        return Ok(Some(projects));
     }
 
-    let mut projects = cache.projects;
-    for project in &mut projects {
-        project.refresh_search_key();
+    if parse_errors.is_empty() {
+        Ok(None)
+    } else {
+        Err(parse_errors.join("; "))
     }
-    crate::sort_projects(&mut projects);
-
-    Ok(Some(projects))
 }
 
 pub fn save_projects(projects: &[Project]) -> Result<(), String> {
@@ -56,7 +99,25 @@ fn save_projects_to_path(path: &std::path::Path, projects: &[Project]) -> Result
     };
     let raw =
         toml::to_string(&cache).map_err(|error| format!("serializing project cache: {error}"))?;
-    crate::config::write_crash_safe(path, raw.as_bytes())
+    crate::persistence::write_recoverable_checked(path, raw.as_bytes(), || {
+        if path.exists() {
+            let existing = std::fs::read_to_string(path)
+                .map_err(|error| format!("reading {} before save: {error}", path.display()))?;
+            if let Ok(value) = toml::from_str::<toml::Value>(&existing) {
+                let existing_version = value
+                    .get("version")
+                    .and_then(toml::Value::as_integer)
+                    .unwrap_or_default();
+                if existing_version > i64::from(CACHE_VERSION) {
+                    return Err(format!(
+                        "refusing to overwrite project cache version {existing_version} at {}; this build supports version {CACHE_VERSION}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -135,7 +196,108 @@ projects = []
         std::fs::write(&path, future).unwrap();
 
         assert!(load_projects_from_path(&path).unwrap().is_none());
+        let save_error = save_projects_to_path(&path, &[fixture_project("older")]).unwrap_err();
+
+        assert!(save_error.contains("refusing to overwrite project cache version 99"));
         assert_eq!(std::fs::read(&path).unwrap(), future);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_live_cache_is_restored_from_backup() {
+        let directory = test_directory("missing-live-cache");
+        let path = directory.join("projects.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let backup = toml::to_string(&ProjectCache {
+            version: CACHE_VERSION,
+            projects: vec![fixture_project("recovered")],
+        })
+        .unwrap();
+        std::fs::write(path.with_extension("bak"), backup.as_bytes()).unwrap();
+
+        let projects = load_projects_from_path(&path).unwrap().unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "recovered");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), backup);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("bak")).unwrap(),
+            backup
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_live_cache_is_restored_from_backup() {
+        let directory = test_directory("malformed-live-cache");
+        let path = directory.join("projects.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let backup = toml::to_string(&ProjectCache {
+            version: CACHE_VERSION,
+            projects: vec![fixture_project("last-known-good")],
+        })
+        .unwrap();
+        std::fs::write(&path, b"this is not valid = [toml").unwrap();
+        std::fs::write(path.with_extension("bak"), backup.as_bytes()).unwrap();
+
+        let projects = load_projects_from_path(&path).unwrap().unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "last-known-good");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), backup);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("bak")).unwrap(),
+            backup
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn future_live_cache_blocks_recovery_from_older_backup() {
+        let directory = test_directory("future-live-cache");
+        let path = directory.join("projects.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let future = b"version = 99\nprojects = []\n";
+        let backup = toml::to_string(&ProjectCache {
+            version: CACHE_VERSION,
+            projects: vec![fixture_project("older")],
+        })
+        .unwrap();
+        std::fs::write(&path, future).unwrap();
+        std::fs::write(path.with_extension("bak"), backup.as_bytes()).unwrap();
+
+        assert!(load_projects_from_path(&path).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), future);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("bak")).unwrap(),
+            backup
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_live_cache_is_restored_from_unique_temporary_file() {
+        let directory = test_directory("unique-temp-cache");
+        let path = directory.join("projects.toml");
+        let temporary = directory.join("projects.tmp.4242.1");
+        std::fs::create_dir_all(&directory).unwrap();
+        let recoverable = toml::to_string(&ProjectCache {
+            version: CACHE_VERSION,
+            projects: vec![fixture_project("temporary")],
+        })
+        .unwrap();
+        std::fs::write(&temporary, recoverable.as_bytes()).unwrap();
+
+        let projects = load_projects_from_path(&path).unwrap().unwrap();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "temporary");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), recoverable);
+        assert!(!temporary.exists());
 
         std::fs::remove_dir_all(directory).unwrap();
     }

@@ -2,6 +2,7 @@ mod cache;
 mod cancellation;
 mod config;
 mod discovery;
+mod persistence;
 mod remote;
 mod workspace;
 

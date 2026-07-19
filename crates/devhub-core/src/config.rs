@@ -173,12 +173,12 @@ impl Config {
     }
 
     fn load_or_create_at(path: &std::path::Path) -> Result<Self, String> {
-        if path.exists() {
-            Self::load_from_path(path)
-        } else {
+        if crate::persistence::read_candidates(path)?.is_empty() {
             let config = Self::default();
             config.save_to_path(path)?;
             Ok(config)
+        } else {
+            Self::load_from_path(path)
         }
     }
 
@@ -189,51 +189,105 @@ impl Config {
     }
 
     fn load_from_path(path: &std::path::Path) -> Result<Self, String> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|error| format!("reading {}: {error}", path.display()))?;
-        let mut config: Self =
-            toml::from_str(&raw).map_err(|error| format!("parsing {}: {error}", path.display()))?;
-
-        match config.version {
-            CONFIG_VERSION => {
-                config.normalize();
-                Ok(config)
-            }
-            0 => {
-                config.version = CONFIG_VERSION;
-                config.normalize();
-                config.save_to_path(path).map_err(|error| {
-                    format!("migrating legacy config at {}: {error}", path.display())
-                })?;
-                Ok(config)
-            }
-            version => Err(format!(
-                "config version {version} at {} is newer than supported version {CONFIG_VERSION}; the file was not modified",
-                path.display()
-            )),
+        let candidates = crate::persistence::read_candidates(path)?;
+        if candidates.is_empty() {
+            return Err(format!("reading {}: file not found", path.display()));
         }
-    }
 
-    fn save_to_path(&self, path: &std::path::Path) -> Result<(), String> {
-        if path.exists() {
-            let existing = std::fs::read_to_string(path)
-                .map_err(|error| format!("reading {} before save: {error}", path.display()))?;
-            if let Ok(value) = toml::from_str::<toml::Value>(&existing) {
-                let existing_version = value
-                    .get("version")
-                    .and_then(toml::Value::as_integer)
-                    .unwrap_or_default();
-                if existing_version > i64::from(CONFIG_VERSION) {
-                    return Err(format!(
-                        "refusing to overwrite config version {existing_version} at {}; this build supports version {CONFIG_VERSION}",
+        let live_snapshot = candidates
+            .first()
+            .filter(|candidate| candidate.kind == crate::persistence::CandidateKind::Live)
+            .and_then(|candidate| candidate.contents.as_ref().ok())
+            .cloned();
+        let mut parse_errors = Vec::new();
+        for candidate in candidates {
+            let contents = match candidate.contents {
+                Ok(contents) => contents,
+                Err(error) if candidate.kind == crate::persistence::CandidateKind::Live => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    parse_errors.push(error);
+                    continue;
+                }
+            };
+            let mut config: Self = match toml::from_str(&contents) {
+                Ok(config) => config,
+                Err(error) => {
+                    parse_errors.push(format!(
+                        "parsing {} {}: {error}",
+                        candidate.kind.label(),
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+
+            if config.version > CONFIG_VERSION {
+                return Err(format!(
+                    "config version {} in the {} at {} is newer than supported version {CONFIG_VERSION}; no file was modified",
+                    config.version,
+                    candidate.kind.label(),
+                    path.display()
+                ));
+            }
+
+            if candidate.kind != crate::persistence::CandidateKind::Live {
+                crate::persistence::restore_recovered(
+                    path,
+                    live_snapshot.as_deref(),
+                    contents.as_bytes(),
+                )?;
+            }
+
+            match config.version {
+                CONFIG_VERSION => {
+                    config.normalize();
+                    return Ok(config);
+                }
+                0 => {
+                    config.version = CONFIG_VERSION;
+                    config.normalize();
+                    config.save_to_path(path).map_err(|error| {
+                        format!("migrating legacy config at {}: {error}", path.display())
+                    })?;
+                    return Ok(config);
+                }
+                version => {
+                    parse_errors.push(format!(
+                        "unsupported config version {version} in the {} at {}",
+                        candidate.kind.label(),
                         path.display()
                     ));
                 }
             }
         }
+
+        Err(parse_errors.join("; "))
+    }
+
+    fn save_to_path(&self, path: &std::path::Path) -> Result<(), String> {
         let serialized =
             toml::to_string_pretty(self).map_err(|error| format!("serializing config: {error}"))?;
-        write_crash_safe(path, serialized.as_bytes())
+        crate::persistence::write_recoverable_checked(path, serialized.as_bytes(), || {
+            if path.exists() {
+                let existing = std::fs::read_to_string(path)
+                    .map_err(|error| format!("reading {} before save: {error}", path.display()))?;
+                if let Ok(value) = toml::from_str::<toml::Value>(&existing) {
+                    let existing_version = value
+                        .get("version")
+                        .and_then(toml::Value::as_integer)
+                        .unwrap_or_default();
+                    if existing_version > i64::from(CONFIG_VERSION) {
+                        return Err(format!(
+                            "refusing to overwrite config version {existing_version} at {}; this build supports version {CONFIG_VERSION}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     pub fn normalize(&mut self) {
@@ -287,40 +341,6 @@ pub fn normalize_ssh_host(raw: &str) -> String {
         .map(str::trim)
         .unwrap_or_else(|| raw.trim())
         .to_string()
-}
-
-pub(crate) fn write_crash_safe(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("creating {}: {error}", parent.display()))?;
-
-    let temporary = path.with_extension("tmp");
-    let backup = path.with_extension("bak");
-    std::fs::write(&temporary, contents)
-        .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
-
-    if backup.exists() {
-        std::fs::remove_file(&backup)
-            .map_err(|error| format!("removing {}: {error}", backup.display()))?;
-    }
-    if path.exists() {
-        std::fs::rename(path, &backup)
-            .map_err(|error| format!("backing up {}: {error}", path.display()))?;
-    }
-
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        if backup.exists() {
-            let _ = std::fs::rename(&backup, path);
-        }
-        return Err(format!("replacing {}: {error}", path.display()));
-    }
-
-    if backup.exists() {
-        let _ = std::fs::remove_file(backup);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -421,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn crash_safe_write_replaces_existing_content_and_cleans_auxiliary_files() {
+    fn recoverable_write_replaces_content_and_retains_last_known_good_backup() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -432,12 +452,12 @@ mod tests {
         ));
         let path = directory.join("config.toml");
 
-        write_crash_safe(&path, b"first").unwrap();
-        write_crash_safe(&path, b"second").unwrap();
+        crate::persistence::write_recoverable(&path, b"first").unwrap();
+        crate::persistence::write_recoverable(&path, b"second").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"second");
         assert!(!path.with_extension("tmp").exists());
-        assert!(!path.with_extension("bak").exists());
+        assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), b"first");
 
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -462,7 +482,7 @@ mod tests {
         assert_eq!(config.max_depth, 7);
         assert!(migrated.contains("version = 1"));
         assert!(!path.with_extension("tmp").exists());
-        assert!(!path.with_extension("bak").exists());
+        assert!(path.with_extension("bak").exists());
 
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -517,6 +537,106 @@ mod tests {
 
         assert!(error.contains("parsing"));
         assert_eq!(std::fs::read(&path).unwrap(), malformed);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_live_config_is_restored_from_backup_without_defaulting() {
+        let directory = test_directory("missing-live-recovery");
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let backup =
+            b"version = 1\ntheme = \"tokyo-night-storm\"\nappearance = \"system\"\nmax_depth = 9\n";
+        std::fs::write(path.with_extension("bak"), backup).unwrap();
+        std::fs::write(path.with_extension("tmp"), b"incomplete = [").unwrap();
+
+        let config = Config::load_or_create_at(&path).unwrap();
+
+        assert_eq!(config.theme, ThemeId::TokyoNightStorm);
+        assert_eq!(config.appearance, AppearanceMode::System);
+        assert_eq!(config.max_depth, 9);
+        assert_eq!(std::fs::read(&path).unwrap(), backup);
+        assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), backup);
+        assert!(!path.with_extension("tmp").exists());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_live_config_is_restored_from_last_known_good_backup() {
+        let directory = test_directory("malformed-live-recovery");
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let malformed = b"version = [broken";
+        let backup =
+            b"version = 1\ntheme = \"rose-pine-moon\"\nappearance = \"dark\"\nmax_depth = 6\n";
+        std::fs::write(&path, malformed).unwrap();
+        std::fs::write(path.with_extension("bak"), backup).unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.theme, ThemeId::RosePineMoon);
+        assert_eq!(config.max_depth, 6);
+        assert_eq!(std::fs::read(&path).unwrap(), backup);
+        assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), backup);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn future_live_config_blocks_recovery_from_older_backup() {
+        let directory = test_directory("future-live-authority");
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let future = b"version = 99\nmax_depth = 12\n";
+        let backup = b"version = 1\nmax_depth = 3\n";
+        std::fs::write(&path, future).unwrap();
+        std::fs::write(path.with_extension("bak"), backup).unwrap();
+
+        let error = Config::load_from_path(&path).unwrap_err();
+
+        assert!(error.contains("newer than supported version 1"));
+        assert_eq!(std::fs::read(&path).unwrap(), future);
+        assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), backup);
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_live_config_is_restored_from_unique_temporary_file() {
+        let directory = test_directory("unique-temp-recovery");
+        let path = directory.join("config.toml");
+        let temporary = directory.join("config.tmp.4242.1");
+        std::fs::create_dir_all(&directory).unwrap();
+        let recoverable =
+            b"version = 1\ntheme = \"horizon-bold\"\nappearance = \"light\"\nmax_depth = 8\n";
+        std::fs::write(&temporary, recoverable).unwrap();
+
+        let config = Config::load_or_create_at(&path).unwrap();
+
+        assert_eq!(config.theme, ThemeId::HorizonBold);
+        assert_eq!(config.appearance, AppearanceMode::Light);
+        assert_eq!(config.max_depth, 8);
+        assert_eq!(std::fs::read(&path).unwrap(), recoverable);
+        assert!(!temporary.exists());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn future_backup_blocks_creation_of_an_older_live_config() {
+        let directory = test_directory("future-backup-authority");
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let future = b"version = 99\nmax_depth = 12\n";
+        std::fs::write(path.with_extension("bak"), future).unwrap();
+
+        let error = Config::load_or_create_at(&path).unwrap_err();
+
+        assert!(error.contains("newer than supported version 1"));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), future);
 
         std::fs::remove_dir_all(directory).unwrap();
     }
