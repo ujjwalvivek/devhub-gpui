@@ -9,16 +9,18 @@ use crate::ui::{
 };
 use devhub_core::{
     cache_path, list_local_subdirs, list_project_tree_cancellable, list_remote_subdirs_cancellable,
-    load_projects, local_roots, open_project_in_zed, read_project_file_cancellable,
-    read_project_readme_cancellable, save_projects, scan_directories_cancellable,
-    scan_remote_host_cancellable, search_project_content_cancellable, sort_projects,
-    validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode, CancellationToken,
-    Config, DirectoryEntry, FileEntry, Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
+    load_projects_with_diagnostics, local_roots, open_project_in_zed,
+    read_project_file_cancellable, read_project_readme_cancellable, save_projects_with_diagnostics,
+    scan_directories_cancellable, scan_remote_host_cancellable, search_project_content_cancellable,
+    sort_projects, validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode,
+    CancellationToken, Config, DirectoryEntry, FileEntry, PersistenceEvent, PersistenceFailure,
+    Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
-    filtered_project_indices, has_scan_sources, language_for_path, markdown_fenced_source,
-    next_selection, omit_markdown_images, partition_local_scan_roots, previous_selection,
-    should_show_ftue, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
+    accepts_manual_search_character, filtered_project_indices, has_scan_sources, language_for_path,
+    markdown_fenced_source, next_selection, omit_markdown_images, partition_local_scan_roots,
+    persistence_status_text, previous_selection, should_show_ftue, PersistenceHistory, ScanModel,
+    ScanState, Theme, MONO_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -53,6 +55,7 @@ struct DevHubLite {
     selected: Option<usize>,
     filter_query: String,
     launch_error: Option<String>,
+    persistence_history: PersistenceHistory,
     scan_root: PathBuf,
     config: Config,
     focus_handle: FocusHandle,
@@ -145,16 +148,21 @@ impl DevHubLite {
         window.focus(&focus_handle);
 
         let mut startup_errors = Vec::new();
+        let mut persistence_history = PersistenceHistory::default();
         let config_existed = Config::config_path().is_some_and(|path| path.is_file());
         let cache_existed = cache_path().is_some_and(|path| path.is_file());
         let show_ftue = should_show_ftue(config_existed, cache_existed);
         if let Err(error) = Config::ensure_dirs_exist() {
             startup_errors.push(error);
         }
-        let config = match Config::load_or_create() {
-            Ok(config) => config,
+        let config = match Config::load_or_create_with_diagnostics() {
+            Ok(report) => {
+                persistence_history.record_events(report.events);
+                report.value
+            }
             Err(error) => {
-                startup_errors.push(error);
+                persistence_history.record_failure(&error);
+                startup_errors.push(error.to_string());
                 Config::default()
             }
         };
@@ -166,11 +174,14 @@ impl DevHubLite {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let initial_projects = match load_projects() {
-            Ok(Some(projects)) => projects,
-            Ok(None) => Vec::new(),
+        let initial_projects = match load_projects_with_diagnostics() {
+            Ok(report) => {
+                persistence_history.record_events(report.events);
+                report.value.unwrap_or_default()
+            }
             Err(error) => {
-                startup_errors.push(error);
+                persistence_history.record_failure(&error);
+                startup_errors.push(error.to_string());
                 Vec::new()
             }
         };
@@ -183,6 +194,7 @@ impl DevHubLite {
             selected: None,
             filter_query: String::new(),
             launch_error: (!startup_errors.is_empty()).then(|| startup_errors.join(" | ")),
+            persistence_history,
             scan_root,
             config,
             focus_handle,
@@ -316,6 +328,24 @@ impl DevHubLite {
         self.config.pinned_projects.contains(&project.path)
     }
 
+    fn record_persistence_failure(&mut self, error: PersistenceFailure) {
+        self.persistence_history.record_failure(&error);
+        self.launch_error = Some(error.to_string());
+    }
+
+    fn save_config(&mut self) -> bool {
+        match self.config.save_with_diagnostics() {
+            Ok(report) => {
+                self.persistence_history.record_events(report.events);
+                true
+            }
+            Err(error) => {
+                self.record_persistence_failure(error);
+                false
+            }
+        }
+    }
+
     fn toggle_pin(&mut self, filtered_index: usize, cx: &mut Context<Self>) {
         let indices = self.filtered_indices();
         let Some(&project_index) = indices.get(filtered_index) else {
@@ -330,9 +360,7 @@ impl DevHubLite {
         } else {
             self.config.pinned_projects.push(path.clone());
         }
-        if let Err(error) = self.config.save() {
-            self.launch_error = Some(error);
-        }
+        self.save_config();
         self.context_menu = None;
         cx.notify();
     }
@@ -355,9 +383,7 @@ impl DevHubLite {
         } else {
             self.config.hidden_projects.push(path.clone());
         }
-        if let Err(error) = self.config.save() {
-            self.launch_error = Some(error);
-        }
+        self.save_config();
         self.context_menu = None;
         self.selected = None;
         cx.notify();
@@ -375,9 +401,7 @@ impl DevHubLite {
         {
             self.config.hidden_projects.remove(pos);
         }
-        if let Err(error) = self.config.save() {
-            self.launch_error = Some(error);
-        }
+        self.save_config();
         cx.notify();
     }
 
@@ -452,8 +476,13 @@ impl DevHubLite {
                     this.launch_error =
                         (!remote_errors.is_empty()).then(|| remote_errors.join(" | "));
                     if matches!(this.scan.state, ScanState::Loaded { .. } | ScanState::Empty) {
-                        if let Err(error) = save_projects(&this.scan.projects) {
-                            this.launch_error = Some(error);
+                        match save_projects_with_diagnostics(&this.scan.projects) {
+                            Ok(report) => {
+                                this.persistence_history.record_events(report.events);
+                            }
+                            Err(error) => {
+                                this.record_persistence_failure(error);
+                            }
                         }
                     }
                     cx.notify();
@@ -983,13 +1012,14 @@ impl DevHubLite {
         config.theme = self.pending_theme;
         config.appearance = self.pending_appearance;
         config.normalize();
-        match config.save() {
-            Ok(()) => {
+        match config.save_with_diagnostics() {
+            Ok(report) => {
+                self.persistence_history.record_events(report.events);
                 self.config = config;
                 self.show_settings = false;
                 self.begin_scan(window, cx);
             }
-            Err(error) => self.launch_error = Some(error),
+            Err(error) => self.record_persistence_failure(error),
         }
         cx.notify();
     }
@@ -2020,7 +2050,7 @@ impl DevHubLite {
         let candidate = event.keystroke.key_char.as_deref().unwrap_or(key);
         if candidate.chars().count() == 1 {
             let ch = candidate.chars().next().unwrap();
-            if ch.is_ascii_graphic() || ch == ' ' {
+            if accepts_manual_search_character(ch) {
                 self.search_query.push(ch.to_ascii_lowercase());
                 self.search_generation = self.search_generation.wrapping_add(1);
                 self.search_state = LoadState::Idle;
@@ -2893,6 +2923,14 @@ impl Render for DevHubLite {
         };
         let scan_status = scan_status(&self.scan.state, &self.scan_root);
         let status_color = scan_state_color(theme, &self.scan.state);
+        let persistence_status_message = self
+            .persistence_history
+            .latest()
+            .map(persistence_status_text);
+        let persistence_status_color = self.persistence_history.latest().map(|event| match event {
+            PersistenceEvent::Recovered { .. } => theme.warning,
+            PersistenceEvent::Conflict { .. } => theme.error,
+        });
         let has_active_operations = self.has_active_operations();
         let total_count = self.scan.projects.len();
         let visible_count = filtered_indices.len();
@@ -3331,6 +3369,10 @@ impl Render for DevHubLite {
                                     theme.error
                                 } else if self.copy_feedback.is_some() {
                                     theme.success
+                                } else if filter_active {
+                                    theme.accent
+                                } else if persistence_status_message.is_some() {
+                                    persistence_status_color.unwrap_or(theme.warning)
                                 } else {
                                     status_color
                                 },
@@ -3361,6 +3403,15 @@ impl Render for DevHubLite {
                                                 .overflow_hidden()
                                                 .child(self.filter_query.clone()),
                                         )
+                                } else if let Some(message) = &persistence_status_message {
+                                    div()
+                                        .font_family(MONO_FONT)
+                                        .text_color(
+                                            persistence_status_color.unwrap_or(theme.warning),
+                                        )
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(message.clone())
                                 } else {
                                     div()
                                         .whitespace_nowrap()

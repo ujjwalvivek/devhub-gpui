@@ -700,6 +700,29 @@ mod tests {
     }
 
     #[test]
+    fn search_content_baseline_includes_hidden_files() {
+        let root = TestDir::new("search-hidden");
+        root.write("visible.txt", "visible only\n");
+        root.write(".env", "DEVHUB_HIDDEN_SEARCH_BASELINE\n");
+
+        let hits = search_content(&root.path, "hidden_search_baseline");
+
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with(".env"));
+    }
+
+    #[test]
+    fn search_content_matches_unicode_case_insensitively() {
+        let root = TestDir::new("search-unicode");
+        root.write("notes.txt", "\u{00dc}BER VIEW\n");
+
+        let hits = search_content(&root.path, "\u{00fc}ber");
+
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with("notes.txt"));
+    }
+
+    #[test]
     fn search_content_returns_empty_for_empty_query() {
         let root = TestDir::new("empty");
         root.write("file.txt", "content\n");

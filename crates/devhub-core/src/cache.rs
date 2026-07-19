@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::persistence::{
+    PersistenceEvent, PersistenceFailure, PersistenceOperation, PersistenceRecoverySource,
+    PersistenceReport, PersistenceStore,
+};
 use crate::Project;
 
 const CACHE_VERSION: u32 = 1;
@@ -15,15 +19,33 @@ pub fn cache_path() -> Option<std::path::PathBuf> {
 }
 
 pub fn load_projects() -> Result<Option<Vec<Project>>, String> {
-    let path = cache_path()
-        .ok_or_else(|| "cannot determine the devhub-gpui cache directory".to_string())?;
-    load_projects_from_path(&path)
+    load_projects_with_diagnostics()
+        .map(|report| report.value)
+        .map_err(|error| error.to_string())
 }
 
+pub fn load_projects_with_diagnostics(
+) -> Result<PersistenceReport<Option<Vec<Project>>>, PersistenceFailure> {
+    let path = cache_path().ok_or_else(|| {
+        PersistenceFailure::other("cannot determine the devhub-gpui cache directory")
+    })?;
+    load_projects_from_path_with_diagnostics(&path)
+}
+
+#[cfg(test)]
 fn load_projects_from_path(path: &std::path::Path) -> Result<Option<Vec<Project>>, String> {
-    let candidates = crate::persistence::read_candidates(path)?;
+    load_projects_from_path_with_diagnostics(path)
+        .map(|report| report.value)
+        .map_err(|error| error.to_string())
+}
+
+fn load_projects_from_path_with_diagnostics(
+    path: &std::path::Path,
+) -> Result<PersistenceReport<Option<Vec<Project>>>, PersistenceFailure> {
+    let candidates =
+        crate::persistence::read_candidates(path).map_err(PersistenceFailure::other)?;
     if candidates.is_empty() {
-        return Ok(None);
+        return Ok(PersistenceReport::new(None));
     }
 
     let live_snapshot = candidates
@@ -36,7 +58,7 @@ fn load_projects_from_path(path: &std::path::Path) -> Result<Option<Vec<Project>
         let contents = match candidate.contents {
             Ok(contents) => contents,
             Err(error) if candidate.kind == crate::persistence::CandidateKind::Live => {
-                return Err(error);
+                return Err(PersistenceFailure::other(error));
             }
             Err(error) => {
                 parse_errors.push(error);
@@ -57,17 +79,35 @@ fn load_projects_from_path(path: &std::path::Path) -> Result<Option<Vec<Project>
 
         if cache.version != CACHE_VERSION {
             if candidate.kind == crate::persistence::CandidateKind::Live {
-                return Ok(None);
+                return Ok(PersistenceReport::new(None));
             }
             continue;
         }
 
+        let mut events = Vec::new();
         if candidate.kind != crate::persistence::CandidateKind::Live {
             crate::persistence::restore_recovered(
                 path,
                 live_snapshot.as_deref(),
                 contents.as_bytes(),
-            )?;
+            )
+            .map_err(|error| {
+                error.into_failure(
+                    PersistenceStore::ProjectCache,
+                    PersistenceOperation::Recovery,
+                )
+            })?;
+            let source = match candidate.kind {
+                crate::persistence::CandidateKind::Backup => PersistenceRecoverySource::Backup,
+                crate::persistence::CandidateKind::Temporary => {
+                    PersistenceRecoverySource::Temporary
+                }
+                crate::persistence::CandidateKind::Live => unreachable!(),
+            };
+            events.push(PersistenceEvent::Recovered {
+                store: PersistenceStore::ProjectCache,
+                source,
+            });
         }
 
         let mut projects = cache.projects;
@@ -76,29 +116,52 @@ fn load_projects_from_path(path: &std::path::Path) -> Result<Option<Vec<Project>
         }
         crate::sort_projects(&mut projects);
 
-        return Ok(Some(projects));
+        return Ok(PersistenceReport {
+            value: Some(projects),
+            events,
+        });
     }
 
     if parse_errors.is_empty() {
-        Ok(None)
+        Ok(PersistenceReport::new(None))
     } else {
-        Err(parse_errors.join("; "))
+        Err(PersistenceFailure::other(parse_errors.join("; ")))
     }
 }
 
 pub fn save_projects(projects: &[Project]) -> Result<(), String> {
-    let path = cache_path()
-        .ok_or_else(|| "cannot determine the devhub-gpui cache directory".to_string())?;
-    save_projects_to_path(&path, projects)
+    save_projects_with_diagnostics(projects)
+        .map(|report| report.value)
+        .map_err(|error| error.to_string())
 }
 
+pub fn save_projects_with_diagnostics(
+    projects: &[Project],
+) -> Result<PersistenceReport<()>, PersistenceFailure> {
+    let path = cache_path().ok_or_else(|| {
+        PersistenceFailure::other("cannot determine the devhub-gpui cache directory")
+    })?;
+    save_projects_to_path_with_diagnostics(&path, projects)
+}
+
+#[cfg(test)]
 fn save_projects_to_path(path: &std::path::Path, projects: &[Project]) -> Result<(), String> {
+    save_projects_to_path_with_diagnostics(path, projects)
+        .map(|report| report.value)
+        .map_err(|error| error.to_string())
+}
+
+fn save_projects_to_path_with_diagnostics(
+    path: &std::path::Path,
+    projects: &[Project],
+) -> Result<PersistenceReport<()>, PersistenceFailure> {
     let cache = ProjectCache {
         version: CACHE_VERSION,
         projects: projects.to_vec(),
     };
-    let raw =
-        toml::to_string(&cache).map_err(|error| format!("serializing project cache: {error}"))?;
+    let raw = toml::to_string(&cache).map_err(|error| {
+        PersistenceFailure::other(format!("serializing project cache: {error}"))
+    })?;
     crate::persistence::write_recoverable_checked(path, raw.as_bytes(), || {
         if path.exists() {
             let existing = std::fs::read_to_string(path)
@@ -115,9 +178,16 @@ fn save_projects_to_path(path: &std::path::Path, projects: &[Project]) -> Result
                     ));
                 }
             }
-        }
-        Ok(())
-    })
+            }
+            Ok(())
+        })
+        .map_err(|error| {
+            error.into_failure(
+                PersistenceStore::ProjectCache,
+                PersistenceOperation::Write,
+            )
+        })?;
+    Ok(PersistenceReport::new(()))
 }
 
 #[cfg(test)]
@@ -216,7 +286,15 @@ projects = []
         .unwrap();
         std::fs::write(path.with_extension("bak"), backup.as_bytes()).unwrap();
 
-        let projects = load_projects_from_path(&path).unwrap().unwrap();
+        let report = load_projects_from_path_with_diagnostics(&path).unwrap();
+        assert_eq!(
+            report.events,
+            [PersistenceEvent::Recovered {
+                store: PersistenceStore::ProjectCache,
+                source: PersistenceRecoverySource::Backup,
+            }]
+        );
+        let projects = report.value.unwrap();
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "recovered");
@@ -242,7 +320,15 @@ projects = []
         std::fs::write(&path, b"this is not valid = [toml").unwrap();
         std::fs::write(path.with_extension("bak"), backup.as_bytes()).unwrap();
 
-        let projects = load_projects_from_path(&path).unwrap().unwrap();
+        let report = load_projects_from_path_with_diagnostics(&path).unwrap();
+        assert_eq!(
+            report.events,
+            [PersistenceEvent::Recovered {
+                store: PersistenceStore::ProjectCache,
+                source: PersistenceRecoverySource::Backup,
+            }]
+        );
+        let projects = report.value.unwrap();
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "last-known-good");
@@ -292,7 +378,15 @@ projects = []
         .unwrap();
         std::fs::write(&temporary, recoverable.as_bytes()).unwrap();
 
-        let projects = load_projects_from_path(&path).unwrap().unwrap();
+        let report = load_projects_from_path_with_diagnostics(&path).unwrap();
+        assert_eq!(
+            report.events,
+            [PersistenceEvent::Recovered {
+                store: PersistenceStore::ProjectCache,
+                source: PersistenceRecoverySource::Temporary,
+            }]
+        );
+        let projects = report.value.unwrap();
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "temporary");

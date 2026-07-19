@@ -4,14 +4,22 @@ mod config;
 mod discovery;
 mod persistence;
 mod remote;
+mod ssh;
 mod workspace;
 
-pub use cache::{cache_path, load_projects, save_projects};
+pub use cache::{
+    cache_path, load_projects, load_projects_with_diagnostics, save_projects,
+    save_projects_with_diagnostics,
+};
 pub use cancellation::{CancellationToken, OPERATION_CANCELLED};
 pub use config::{normalize_ssh_host, AppearanceMode, Config, RemoteHostConfig, ThemeId};
 pub use discovery::{
     scan_directories, scan_directories_cancellable, sort_projects, Project, ProjectSource,
     ProjectType,
+};
+pub use persistence::{
+    PersistenceEvent, PersistenceFailure, PersistenceOperation, PersistenceRecoverySource,
+    PersistenceReport, PersistenceStore,
 };
 pub use remote::{
     check_ssh_connection, check_ssh_connection_cancellable, list_remote_subdirs,

@@ -7,6 +7,117 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const NO_FAULT: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceStore {
+    Config,
+    ProjectCache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceRecoverySource {
+    Backup,
+    Temporary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceOperation {
+    Recovery,
+    Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistenceEvent {
+    Recovered {
+        store: PersistenceStore,
+        source: PersistenceRecoverySource,
+    },
+    Conflict {
+        store: PersistenceStore,
+        operation: PersistenceOperation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistenceReport<T> {
+    pub value: T,
+    pub events: Vec<PersistenceEvent>,
+}
+
+impl<T> PersistenceReport<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            value,
+            events: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistenceFailure {
+    message: String,
+    event: Option<PersistenceEvent>,
+}
+
+impl PersistenceFailure {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn event(&self) -> Option<&PersistenceEvent> {
+        self.event.as_ref()
+    }
+
+    pub(crate) fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            event: None,
+        }
+    }
+
+    pub(crate) fn context(mut self, context: impl std::fmt::Display) -> Self {
+        self.message = format!("{context}: {}", self.message);
+        self
+    }
+}
+
+impl std::fmt::Display for PersistenceFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PersistenceFailure {}
+
+#[derive(Debug)]
+pub(crate) enum PersistenceError {
+    Conflict(String),
+    Other(String),
+}
+
+impl PersistenceError {
+    pub(crate) fn into_failure(
+        self,
+        store: PersistenceStore,
+        operation: PersistenceOperation,
+    ) -> PersistenceFailure {
+        match self {
+            Self::Conflict(message) => PersistenceFailure {
+                message,
+                event: Some(PersistenceEvent::Conflict { store, operation }),
+            },
+            Self::Other(message) => PersistenceFailure::other(message),
+        }
+    }
+}
+
+impl std::fmt::Display for PersistenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(message) | Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateKind {
     Live,
     Backup,
@@ -58,37 +169,39 @@ pub(crate) fn read_candidates(path: &Path) -> Result<Vec<Candidate>, String> {
 
 #[cfg(test)]
 pub(crate) fn write_recoverable(path: &Path, contents: &[u8]) -> Result<(), String> {
-    write_recoverable_checked(path, contents, || Ok(()))
+    write_recoverable_checked(path, contents, || Ok(())).map_err(|error| error.to_string())
 }
 
 pub(crate) fn write_recoverable_checked(
     path: &Path,
     contents: &[u8],
     validate_existing: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
-    let parent = ensure_parent(path)?;
+) -> Result<(), PersistenceError> {
+    let parent = ensure_parent(path).map_err(PersistenceError::Other)?;
     let _lock = WriteLock::acquire(path)?;
-    validate_existing()?;
-    write_recoverable_locked(path, parent, contents, NO_FAULT)
+    validate_existing().map_err(PersistenceError::Other)?;
+    write_recoverable_locked(path, parent, contents, NO_FAULT).map_err(PersistenceError::Other)
 }
 
 pub(crate) fn restore_recovered(
     path: &Path,
     expected_live: Option<&str>,
     contents: &[u8],
-) -> Result<(), String> {
-    let parent = ensure_parent(path)?;
+) -> Result<(), PersistenceError> {
+    let parent = ensure_parent(path).map_err(PersistenceError::Other)?;
     let _lock = WriteLock::acquire(path)?;
     verify_live_snapshot(path, expected_live)?;
-    let temporary = write_unique_temporary(path, contents)?;
+    let temporary = write_unique_temporary(path, contents).map_err(PersistenceError::Other)?;
 
     if path.exists() {
-        fs::remove_file(path)
-            .map_err(|error| format!("removing invalid {}: {error}", path.display()))?;
+        fs::remove_file(path).map_err(|error| {
+            PersistenceError::Other(format!("removing invalid {}: {error}", path.display()))
+        })?;
     }
 
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("restoring {}: {error}", path.display()))?;
+    fs::rename(&temporary, path).map_err(|error| {
+        PersistenceError::Other(format!("restoring {}: {error}", path.display()))
+    })?;
     sync_parent_if_supported(parent);
 
     for temporary_path in discover_temporary_paths(path).unwrap_or_default() {
@@ -97,18 +210,18 @@ pub(crate) fn restore_recovered(
     Ok(())
 }
 
-fn verify_live_snapshot(path: &Path, expected_live: Option<&str>) -> Result<(), String> {
+fn verify_live_snapshot(path: &Path, expected_live: Option<&str>) -> Result<(), PersistenceError> {
     match (fs::read_to_string(path), expected_live) {
         (Ok(current), Some(expected)) if current == expected => Ok(()),
         (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        (Ok(_), _) | (Err(_), Some(_)) => Err(format!(
+        (Ok(_), _) | (Err(_), Some(_)) => Err(PersistenceError::Conflict(format!(
             "{} changed while recovery was waiting for the writer lock; no file was modified",
             path.display()
-        )),
-        (Err(error), None) => Err(format!(
+        ))),
+        (Err(error), None) => Err(PersistenceError::Other(format!(
             "reading {} during recovery: {error}",
             path.display()
-        )),
+        ))),
     }
 }
 
@@ -246,7 +359,7 @@ struct WriteLock {
 }
 
 impl WriteLock {
-    fn acquire(path: &Path) -> Result<Self, String> {
+    fn acquire(path: &Path) -> Result<Self, PersistenceError> {
         let lock_path = path.with_extension("lock");
         let file = OpenOptions::new()
             .create(true)
@@ -254,16 +367,19 @@ impl WriteLock {
             .read(true)
             .write(true)
             .open(&lock_path)
-            .map_err(|error| format!("opening {}: {error}", lock_path.display()))?;
+            .map_err(|error| {
+                PersistenceError::Other(format!("opening {}: {error}", lock_path.display()))
+            })?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
-            Err(TryLockError::WouldBlock) => Err(format!(
+            Err(TryLockError::WouldBlock) => Err(PersistenceError::Conflict(format!(
                 "another process is writing {}; no file was modified",
                 path.display()
-            )),
-            Err(TryLockError::Error(error)) => {
-                Err(format!("locking {}: {error}", lock_path.display()))
-            }
+            ))),
+            Err(TryLockError::Error(error)) => Err(PersistenceError::Other(format!(
+                "locking {}: {error}",
+                lock_path.display()
+            ))),
         }
     }
 }
@@ -345,7 +461,9 @@ mod tests {
 
         let error = restore_recovered(&path, None, b"stale-recovery").unwrap_err();
 
-        assert!(error.contains("changed while recovery was waiting"));
+        assert!(error
+            .to_string()
+            .contains("changed while recovery was waiting"));
         assert_eq!(fs::read(&path).unwrap(), b"created-by-another-writer");
         assert!(discover_temporary_paths(&path).unwrap().is_empty());
 

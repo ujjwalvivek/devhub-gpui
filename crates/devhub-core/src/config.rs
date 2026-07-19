@@ -2,6 +2,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::persistence::{
+    PersistenceEvent, PersistenceFailure, PersistenceOperation, PersistenceRecoverySource,
+    PersistenceReport, PersistenceStore,
+};
+
 const APP_QUALIFIER: &str = "";
 const APP_ORGANIZATION: &str = "";
 const APP_IDENTITY: &str = "devhub-gpui";
@@ -166,32 +171,75 @@ impl Config {
     }
 
     pub fn load_or_create() -> Result<Self, String> {
-        let path = Self::config_path()
-            .ok_or_else(|| "cannot determine the devhub-gpui config directory".to_string())?;
-
-        Self::load_or_create_at(&path)
+        Self::load_or_create_with_diagnostics()
+            .map(|report| report.value)
+            .map_err(|error| error.to_string())
     }
 
+    pub fn load_or_create_with_diagnostics() -> Result<PersistenceReport<Self>, PersistenceFailure>
+    {
+        let path = Self::config_path().ok_or_else(|| {
+            PersistenceFailure::other("cannot determine the devhub-gpui config directory")
+        })?;
+
+        Self::load_or_create_at_with_diagnostics(&path)
+    }
+
+    #[cfg(test)]
     fn load_or_create_at(path: &std::path::Path) -> Result<Self, String> {
-        if crate::persistence::read_candidates(path)?.is_empty() {
+        Self::load_or_create_at_with_diagnostics(path)
+            .map(|report| report.value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_or_create_at_with_diagnostics(
+        path: &std::path::Path,
+    ) -> Result<PersistenceReport<Self>, PersistenceFailure> {
+        if crate::persistence::read_candidates(path)
+            .map_err(PersistenceFailure::other)?
+            .is_empty()
+        {
             let config = Self::default();
-            config.save_to_path(path)?;
-            Ok(config)
+            let report = config.save_to_path_with_diagnostics(path)?;
+            Ok(PersistenceReport {
+                value: config,
+                events: report.events,
+            })
         } else {
-            Self::load_from_path(path)
+            Self::load_from_path_with_diagnostics(path)
         }
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::config_path()
-            .ok_or_else(|| "cannot determine the devhub-gpui config directory".to_string())?;
-        self.save_to_path(&path)
+        self.save_with_diagnostics()
+            .map(|report| report.value)
+            .map_err(|error| error.to_string())
     }
 
+    pub fn save_with_diagnostics(&self) -> Result<PersistenceReport<()>, PersistenceFailure> {
+        let path = Self::config_path().ok_or_else(|| {
+            PersistenceFailure::other("cannot determine the devhub-gpui config directory")
+        })?;
+        self.save_to_path_with_diagnostics(&path)
+    }
+
+    #[cfg(test)]
     fn load_from_path(path: &std::path::Path) -> Result<Self, String> {
-        let candidates = crate::persistence::read_candidates(path)?;
+        Self::load_from_path_with_diagnostics(path)
+            .map(|report| report.value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_from_path_with_diagnostics(
+        path: &std::path::Path,
+    ) -> Result<PersistenceReport<Self>, PersistenceFailure> {
+        let candidates =
+            crate::persistence::read_candidates(path).map_err(PersistenceFailure::other)?;
         if candidates.is_empty() {
-            return Err(format!("reading {}: file not found", path.display()));
+            return Err(PersistenceFailure::other(format!(
+                "reading {}: file not found",
+                path.display()
+            )));
         }
 
         let live_snapshot = candidates
@@ -204,7 +252,7 @@ impl Config {
             let contents = match candidate.contents {
                 Ok(contents) => contents,
                 Err(error) if candidate.kind == crate::persistence::CandidateKind::Live => {
-                    return Err(error);
+                    return Err(PersistenceFailure::other(error));
                 }
                 Err(error) => {
                     parse_errors.push(error);
@@ -224,34 +272,62 @@ impl Config {
             };
 
             if config.version > CONFIG_VERSION {
-                return Err(format!(
+                return Err(PersistenceFailure::other(format!(
                     "config version {} in the {} at {} is newer than supported version {CONFIG_VERSION}; no file was modified",
                     config.version,
                     candidate.kind.label(),
                     path.display()
-                ));
+                )));
             }
 
+            let mut events = Vec::new();
             if candidate.kind != crate::persistence::CandidateKind::Live {
                 crate::persistence::restore_recovered(
                     path,
                     live_snapshot.as_deref(),
                     contents.as_bytes(),
-                )?;
+                )
+                .map_err(|error| {
+                    error.into_failure(PersistenceStore::Config, PersistenceOperation::Recovery)
+                })?;
+                let source = match candidate.kind {
+                    crate::persistence::CandidateKind::Backup => PersistenceRecoverySource::Backup,
+                    crate::persistence::CandidateKind::Temporary => {
+                        PersistenceRecoverySource::Temporary
+                    }
+                    crate::persistence::CandidateKind::Live => unreachable!(),
+                };
+                events.push(PersistenceEvent::Recovered {
+                    store: PersistenceStore::Config,
+                    source,
+                });
             }
 
             match config.version {
                 CONFIG_VERSION => {
                     config.normalize();
-                    return Ok(config);
+                    return Ok(PersistenceReport {
+                        value: config,
+                        events,
+                    });
                 }
                 0 => {
                     config.version = CONFIG_VERSION;
                     config.normalize();
-                    config.save_to_path(path).map_err(|error| {
-                        format!("migrating legacy config at {}: {error}", path.display())
-                    })?;
-                    return Ok(config);
+                    let migration =
+                        config
+                            .save_to_path_with_diagnostics(path)
+                            .map_err(|error| {
+                                error.context(format!(
+                                    "migrating legacy config at {}",
+                                    path.display()
+                                ))
+                            })?;
+                    events.extend(migration.events);
+                    return Ok(PersistenceReport {
+                        value: config,
+                        events,
+                    });
                 }
                 version => {
                     parse_errors.push(format!(
@@ -263,12 +339,22 @@ impl Config {
             }
         }
 
-        Err(parse_errors.join("; "))
+        Err(PersistenceFailure::other(parse_errors.join("; ")))
     }
 
+    #[cfg(test)]
     fn save_to_path(&self, path: &std::path::Path) -> Result<(), String> {
-        let serialized =
-            toml::to_string_pretty(self).map_err(|error| format!("serializing config: {error}"))?;
+        self.save_to_path_with_diagnostics(path)
+            .map(|report| report.value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn save_to_path_with_diagnostics(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<PersistenceReport<()>, PersistenceFailure> {
+        let serialized = toml::to_string_pretty(self)
+            .map_err(|error| PersistenceFailure::other(format!("serializing config: {error}")))?;
         crate::persistence::write_recoverable_checked(path, serialized.as_bytes(), || {
             if path.exists() {
                 let existing = std::fs::read_to_string(path)
@@ -288,6 +374,10 @@ impl Config {
             }
             Ok(())
         })
+        .map_err(|error| {
+            error.into_failure(PersistenceStore::Config, PersistenceOperation::Write)
+        })?;
+        Ok(PersistenceReport::new(()))
     }
 
     pub fn normalize(&mut self) {
@@ -512,7 +602,9 @@ mod tests {
         let directory = test_directory("clean-install");
         let path = directory.join("nested").join("config.toml");
 
-        let config = Config::load_or_create_at(&path).unwrap();
+        let report = Config::load_or_create_at_with_diagnostics(&path).unwrap();
+        assert!(report.events.is_empty());
+        let config = report.value;
         let serialized = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(config.version, CONFIG_VERSION);
@@ -551,7 +643,15 @@ mod tests {
         std::fs::write(path.with_extension("bak"), backup).unwrap();
         std::fs::write(path.with_extension("tmp"), b"incomplete = [").unwrap();
 
-        let config = Config::load_or_create_at(&path).unwrap();
+        let report = Config::load_or_create_at_with_diagnostics(&path).unwrap();
+        assert_eq!(
+            report.events,
+            [PersistenceEvent::Recovered {
+                store: PersistenceStore::Config,
+                source: PersistenceRecoverySource::Backup,
+            }]
+        );
+        let config = report.value;
 
         assert_eq!(config.theme, ThemeId::TokyoNightStorm);
         assert_eq!(config.appearance, AppearanceMode::System);
@@ -613,7 +713,15 @@ mod tests {
             b"version = 1\ntheme = \"horizon-bold\"\nappearance = \"light\"\nmax_depth = 8\n";
         std::fs::write(&temporary, recoverable).unwrap();
 
-        let config = Config::load_or_create_at(&path).unwrap();
+        let report = Config::load_or_create_at_with_diagnostics(&path).unwrap();
+        assert_eq!(
+            report.events,
+            [PersistenceEvent::Recovered {
+                store: PersistenceStore::Config,
+                source: PersistenceRecoverySource::Temporary,
+            }]
+        );
+        let config = report.value;
 
         assert_eq!(config.theme, ThemeId::HorizonBold);
         assert_eq!(config.appearance, AppearanceMode::Light);
@@ -638,6 +746,38 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), future);
 
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn write_conflict_is_exposed_as_a_typed_diagnostic() {
+        let directory = test_directory("typed-write-conflict");
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .unwrap();
+        lock_file.try_lock().unwrap();
+
+        let error = Config::default()
+            .save_to_path_with_diagnostics(&path)
+            .unwrap_err();
+
+        assert_eq!(
+            error.event().cloned(),
+            Some(PersistenceEvent::Conflict {
+                store: PersistenceStore::Config,
+                operation: PersistenceOperation::Write,
+            })
+        );
+        assert!(error.message().contains("another process is writing"));
+        assert!(!path.exists());
+
+        drop(lock_file);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

@@ -1,5 +1,8 @@
+mod diagnostics;
 mod scan;
 mod theme;
+
+pub use diagnostics::{persistence_status_text, PersistenceHistory};
 
 use std::path::PathBuf;
 
@@ -23,6 +26,10 @@ pub fn filtered_project_indices(projects: &[Project], query: &str) -> Vec<usize>
         .enumerate()
         .filter_map(|(index, project)| project.search_key.contains(query).then_some(index))
         .collect()
+}
+
+pub fn accepts_manual_search_character(character: char) -> bool {
+    character.is_ascii_graphic() || character == ' '
 }
 
 pub fn partition_local_scan_roots(roots: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
@@ -249,7 +256,8 @@ pub use theme::{Theme, MONO_FONT, UI_FONT};
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        filtered_project_indices, has_scan_sources, partition_local_scan_roots, should_show_ftue,
+        accepts_manual_search_character, filtered_project_indices, has_scan_sources,
+        partition_local_scan_roots, should_show_ftue,
     };
     use devhub_core::{Project, ProjectSource, ProjectType};
     use std::path::PathBuf;
@@ -314,5 +322,71 @@ mod startup_tests {
         );
         assert!(filtered_project_indices(&projects, "no-match").is_empty());
         assert_eq!(filtered_project_indices(&projects, "").len(), 50_000);
+    }
+
+    #[test]
+    fn path_only_preferences_collide_across_remote_hosts() {
+        let path = PathBuf::from("/srv/project");
+        let projects = ["build-a", "build-b"].map(|host| Project {
+            name: "project".into(),
+            path: path.clone(),
+            source: ProjectSource::Remote {
+                name: String::new(),
+                host: host.into(),
+            },
+            project_type: ProjectType::Rust,
+            has_git: true,
+            git_remote: None,
+            markers_found: vec!["Cargo.toml".into()],
+            last_modified: None,
+            search_key: String::new(),
+        });
+        let pinned_paths = [path];
+
+        assert!(projects
+            .iter()
+            .all(|project| pinned_paths.contains(&project.path)));
+        assert_ne!(projects[0].source.host(), projects[1].source.host());
+    }
+
+    #[test]
+    fn manual_search_input_baseline_rejects_unicode() {
+        assert!(accepts_manual_search_character('a'));
+        assert!(accepts_manual_search_character(' '));
+        assert!(!accepts_manual_search_character('\u{00e9}'));
+    }
+
+    #[test]
+    #[ignore = "manual release-mode Milestone 0 measurement"]
+    fn measure_large_catalog_filter_baseline() {
+        let projects = (0..50_000)
+            .map(|index| Project {
+                name: format!("project-{index:05}"),
+                path: PathBuf::from(format!(r"F:\projects\project-{index:05}")),
+                source: ProjectSource::Local,
+                project_type: ProjectType::Rust,
+                has_git: true,
+                git_remote: None,
+                markers_found: vec!["Cargo.toml".into()],
+                last_modified: None,
+                search_key: format!("project-{index:05} rust"),
+            })
+            .collect::<Vec<_>>();
+
+        let empty_started = std::time::Instant::now();
+        let all = filtered_project_indices(&projects, "");
+        let empty_elapsed = empty_started.elapsed();
+        let selective_started = std::time::Instant::now();
+        let selective = filtered_project_indices(&projects, "project-49999");
+        let selective_elapsed = selective_started.elapsed();
+
+        assert_eq!(all.len(), 50_000);
+        assert_eq!(selective, [49_999]);
+        println!(
+            "M0_BASELINE filter_projects={} filter_empty_ms={:.3} filter_selective_ms={:.3}",
+            projects.len(),
+            empty_elapsed.as_secs_f64() * 1_000.0,
+            selective_elapsed.as_secs_f64() * 1_000.0,
+        );
     }
 }

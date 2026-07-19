@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use crate::config::{normalize_ssh_host, RemoteHostConfig};
 use crate::discovery::{sort_projects, Project, ProjectSource, ProjectType};
+use crate::ssh::SshRunner;
 use crate::workspace::{FileEntry, SearchHit, TreeListing};
 use crate::CancellationToken;
 
@@ -17,6 +17,8 @@ const MAX_TREE_ENTRIES: usize = 500;
 const MAX_SEARCH_HITS: usize = 200;
 const MAX_PREVIEW_CHARS: usize = 240;
 const MAX_REMOTE_PROJECTS: usize = 1_000;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const REMOTE_IGNORE_FUNCTION: &str = r#"is_git_ignored() {
     candidate="$1"
@@ -435,64 +437,15 @@ fn run_ssh_script(
         .arg("ConnectionAttempts=1")
         .arg(&host)
         .arg("sh")
-        .arg("-s")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg("-s");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|error| format!("starting ssh for {host}: {error}"))?;
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "opening SSH standard input".to_string())?;
-    stdin
-        .write_all(script.as_bytes())
-        .map_err(|error| format!("sending SSH request to {host}: {error}"))?;
-    drop(stdin);
-
-    let started = Instant::now();
-    loop {
-        if cancellation.is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(crate::OPERATION_CANCELLED.into());
-        }
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "SSH operation for {host} timed out after {}s",
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("waiting for SSH operation on {host}: {error}"));
-            }
-        }
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("collecting SSH output from {host}: {error}"))?;
-    if output.stdout.len() > MAX_REMOTE_OUTPUT_BYTES
-        || output.stderr.len() > MAX_REMOTE_OUTPUT_BYTES
-    {
-        return Err("SSH operation exceeded the output limit".into());
-    }
+    let output = SshRunner::new(&host, timeout, MAX_REMOTE_OUTPUT_BYTES, cancellation)
+        .run(cmd, script.as_bytes())
+        .map_err(|error| error.to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.trim();
