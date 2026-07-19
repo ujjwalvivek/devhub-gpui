@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual release-mode Milestone 0 measurement"]
+    #[ignore = "manual release-mode measurement"]
     fn measure_ssh_stream_and_cancellation_baseline() {
         let stream_started = Instant::now();
         let output = run_fake(

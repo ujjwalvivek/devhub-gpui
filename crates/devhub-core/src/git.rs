@@ -199,6 +199,100 @@ impl GitFileChange {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitEntry {
+    pub hash: String,
+    pub author: String,
+    pub date: String,
+    pub message: String,
+    pub files: Vec<String>,
+}
+
+pub const HISTORY_PAGE_SIZE: usize = 100;
+
+pub fn git_log_cancellable(
+    project: &Project,
+    page_size: usize,
+    skip: usize,
+    cancellation: &CancellationToken,
+) -> Result<Vec<CommitEntry>, GitError> {
+    let count = page_size.to_string();
+    let skip_str = skip.to_string();
+    let args: Vec<String> = vec![
+        "log".into(),
+        "--max-count".into(),
+        count,
+        "--skip".into(),
+        skip_str,
+        "--format=%H||%an||%ai||%s".into(),
+        "--numstat".into(),
+    ];
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run_git(project, &refs, CommandClass::Local, cancellation)?;
+    parse_commit_log(&output.stdout)
+}
+
+fn parse_commit_log(output: &[u8]) -> Result<Vec<CommitEntry>, GitError> {
+    let text = std::str::from_utf8(output)
+        .map_err(|_| GitError::new(GitErrorKind::CommandFailed, "Git log output is not UTF-8"))?;
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut commits = Vec::new();
+    let mut current_hash: Option<String> = None;
+    let mut current_author: Option<String> = None;
+    let mut current_date: Option<String> = None;
+    let mut current_message: Option<String> = None;
+    let mut current_files: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.contains("||") {
+            if let Some(hash) = current_hash.take() {
+                commits.push(CommitEntry {
+                    hash,
+                    author: current_author.take().unwrap_or_default(),
+                    date: current_date.take().unwrap_or_default(),
+                    message: current_message.take().unwrap_or_default(),
+                    files: std::mem::take(&mut current_files),
+                });
+            }
+            let parts: Vec<&str> = trimmed.splitn(4, "||").collect();
+            if parts.len() >= 4 {
+                current_hash = Some(parts[0].to_string());
+                current_author = Some(parts[1].to_string());
+                current_date = Some(parts[2].to_string());
+                current_message = Some(parts[3].to_string());
+            }
+        } else if current_hash.is_some() {
+            current_files.push(line.to_string());
+        }
+    }
+    if let Some(hash) = current_hash {
+        commits.push(CommitEntry {
+            hash,
+            author: current_author.unwrap_or_default(),
+            date: current_date.unwrap_or_default(),
+            message: current_message.unwrap_or_default(),
+            files: current_files,
+        });
+    }
+    Ok(commits)
+}
+
+pub fn git_remote_to_github_url(remote: &str, hash: &str) -> Option<String> {
+    let remote = remote.strip_suffix(".git").unwrap_or(remote);
+    let repo = remote
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote.strip_prefix("git@github.com:"))
+        .or_else(|| remote.strip_prefix("git://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))?;
+    Some(format!("https://github.com/{repo}/commit/{hash}"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GitDiffKind {
     Unstaged,
@@ -1271,6 +1365,75 @@ mod tests {
         assert!(script.starts_with("exec 'env' 'GIT_OPTIONAL_LOCKS=0' 'git'"));
         assert!(script.contains("'/srv/work/repo name; touch nope'"));
         assert!(script.ends_with("'status' '--porcelain=v1'\n"));
+    }
+
+    #[test]
+    fn converts_https_remote_to_github_url() {
+        let url = git_remote_to_github_url(
+            "https://github.com/user/repo.git",
+            "abc123def456",
+        );
+        assert_eq!(
+            url,
+            Some("https://github.com/user/repo/commit/abc123def456".into())
+        );
+    }
+
+    #[test]
+    fn converts_ssh_remote_to_github_url() {
+        let url = git_remote_to_github_url(
+            "git@github.com:user/repo.git",
+            "abc123",
+        );
+        assert_eq!(
+            url,
+            Some("https://github.com/user/repo/commit/abc123".into())
+        );
+    }
+
+    #[test]
+    fn converts_git_protocol_remote_to_github_url() {
+        let url = git_remote_to_github_url(
+            "git://github.com/user/repo.git",
+            "abc123",
+        );
+        assert_eq!(
+            url,
+            Some("https://github.com/user/repo/commit/abc123".into())
+        );
+    }
+
+    #[test]
+    fn converts_ssh_url_protocol_remote_to_github_url() {
+        let url = git_remote_to_github_url(
+            "ssh://git@github.com/user/repo.git",
+            "abc123",
+        );
+        assert_eq!(
+            url,
+            Some("https://github.com/user/repo/commit/abc123".into())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_github_remote() {
+        let url = git_remote_to_github_url(
+            "https://gitlab.com/user/repo.git",
+            "abc123",
+        );
+        assert_eq!(url, None);
+    }
+
+    #[test]
+    fn handles_remote_without_dot_git_suffix() {
+        let url = git_remote_to_github_url(
+            "https://github.com/user/repo",
+            "abc123",
+        );
+        assert_eq!(
+            url,
+            Some("https://github.com/user/repo/commit/abc123".into())
+        );
     }
 
     fn test_project(path: PathBuf) -> Project {

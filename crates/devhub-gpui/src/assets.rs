@@ -14,6 +14,9 @@ impl AssetSource for Assets {
                 "../assets/git-branch.svg"
             ))));
         }
+        if path == "history.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/history.svg"))));
+        }
         gpui_component_assets::Assets.load(path)
     }
 
@@ -22,6 +25,7 @@ impl AssetSource for Assets {
         if path.is_empty() {
             assets.push("zed.svg".into());
             assets.push("git-branch.svg".into());
+            assets.push("history.svg".into());
         }
         Ok(assets)
     }

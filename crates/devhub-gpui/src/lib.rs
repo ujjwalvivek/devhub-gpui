@@ -486,7 +486,7 @@ mod startup_tests {
     }
 
     #[test]
-    #[ignore = "manual release-mode Milestone 0 measurement"]
+    #[ignore = "manual release-mode measurement"]
     fn measure_large_catalog_filter_baseline() {
         let projects = (0..50_000)
             .map(|index| Project {

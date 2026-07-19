@@ -9,18 +9,19 @@ use crate::ui::{
 };
 use devhub_core::{
     cache_path, git_branches_cancellable, git_commit_cancellable, git_diff_cancellable,
-    git_discard_cancellable, git_fetch_cancellable, git_push_cancellable,
-    git_stage_all_cancellable, git_stage_cancellable, git_status_cancellable,
-    git_status_summary_cancellable, git_switch_branch_cancellable, git_unstage_all_cancellable,
-    git_unstage_cancellable, list_local_subdirs, list_project_tree_cancellable,
-    list_remote_subdirs_cancellable, load_projects_with_diagnostics, local_roots,
-    open_project_in_zed, read_project_file_cancellable, read_project_readme_cancellable,
+    git_discard_cancellable, git_fetch_cancellable, git_log_cancellable,
+    git_push_cancellable, git_stage_all_cancellable, git_stage_cancellable,
+    git_status_cancellable, git_status_summary_cancellable, git_switch_branch_cancellable,
+    git_unstage_all_cancellable, git_unstage_cancellable, list_local_subdirs,
+    list_project_tree_cancellable, list_remote_subdirs_cancellable,
+    load_projects_with_diagnostics, local_roots, open_project_in_zed,
+    read_project_file_cancellable, read_project_readme_cancellable,
     save_projects_with_diagnostics, scan_directories_cancellable, scan_remote_host_cancellable,
     search_project_content_cancellable, sort_projects, validate_remote_path, validate_ssh_host,
-    zed_ssh_uri, AppearanceMode, CancellationToken, Config, DirectoryEntry, FileEntry, GitBranch,
-    GitDiffKind, GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus,
-    PersistenceEvent, PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit,
-    ThemeId, TreeListing,
+    zed_ssh_uri, AppearanceMode, CancellationToken, CommitEntry, Config, DirectoryEntry,
+    FileEntry, GitBranch, GitDiffKind, GitError, GitErrorKind, GitFileChange, GitOperationResult,
+    GitStatus, git_remote_to_github_url, HISTORY_PAGE_SIZE, PersistenceEvent, PersistenceFailure, Project, ProjectLocator,
+    RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
     filtered_commands, filtered_project_indices, filtered_themes, has_scan_sources,
@@ -69,6 +70,15 @@ impl IconNamed for GitBranchIcon {
     }
 }
 
+#[derive(Clone, Copy)]
+struct HistoryIcon;
+
+impl IconNamed for HistoryIcon {
+    fn path(self) -> SharedString {
+        "history.svg".into()
+    }
+}
+
 actions!(
     devhub,
     [
@@ -86,6 +96,7 @@ actions!(
         ShowFiles,
         ShowSearch,
         ShowGit,
+        ShowHistory,
         ToggleContextPane,
         DismissLauncher,
         AcceptLauncher
@@ -176,6 +187,16 @@ struct DevHubLite {
     readme_generation: u64,
     readme_cancellation: Option<CancellationToken>,
     readme_preview: bool,
+    history_state: LoadState<()>,
+    history_commits: Vec<CommitEntry>,
+    history_generation: u64,
+    history_cancellation: Option<CancellationToken>,
+    history_more_cancellation: Option<CancellationToken>,
+    history_selected: Option<usize>,
+    history_skip: usize,
+    history_has_more: bool,
+    history_open_error: Option<String>,
+
     context_width_px: f32,
     project_catalog_width_px: f32,
     resize_target: Option<ResizeTarget>,
@@ -412,6 +433,16 @@ impl DevHubLite {
             readme_generation: 0,
             readme_cancellation: None,
             readme_preview: true,
+            history_state: LoadState::Idle,
+            history_commits: Vec::new(),
+            history_generation: 0,
+            history_cancellation: None,
+            history_more_cancellation: None,
+            history_selected: None,
+            history_skip: 0,
+            history_has_more: true,
+            history_open_error: None,
+
             context_width_px: 210.0,
             project_catalog_width_px: 276.0,
             resize_target: None,
@@ -468,6 +499,15 @@ impl DevHubLite {
         self.clear_git_commit_message(cx);
         self.git_amend = false;
         self.git_pending_discard = None;
+        Self::cancel_token(&mut self.history_cancellation);
+        Self::cancel_token(&mut self.history_more_cancellation);
+        self.history_generation = self.history_generation.wrapping_add(1);
+        self.history_state = LoadState::Idle;
+        self.history_commits.clear();
+        self.history_selected = None;
+        self.history_skip = 0;
+        self.history_has_more = true;
+        self.history_open_error = None;
         self.git_context_menu = None;
         cx.notify();
     }
@@ -744,6 +784,9 @@ impl DevHubLite {
             Activity::Git => {
                 self.load_git_status(cx);
                 self.start_git_auto_refresh(cx);
+            }
+            Activity::History => {
+                self.load_history(cx);
             }
         }
     }
@@ -1056,6 +1099,104 @@ impl DevHubLite {
     fn open_branch_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_launcher(LauncherMode::Branches, window, cx);
         self.load_git_branches(cx);
+    }
+
+    fn load_history(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        self.history_generation = self.history_generation.wrapping_add(1);
+        let generation = self.history_generation;
+        Self::cancel_token(&mut self.history_cancellation);
+        let cancellation = CancellationToken::new();
+        self.history_cancellation = Some(cancellation.clone());
+        self.history_state = LoadState::Loading;
+        self.history_commits.clear();
+        self.history_skip = 0;
+        self.history_has_more = true;
+        self.history_open_error = None;
+        cx.notify();
+
+        let request_project = project.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { git_log_cancellable(&project, HISTORY_PAGE_SIZE, 0, &cancellation) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.history_generation != generation
+                    || this.selected_project() != Some(&request_project)
+                {
+                    return;
+                }
+                this.history_cancellation = None;
+                match result {
+                    Ok(commits) if commits.is_empty() => {
+                        this.history_state = LoadState::Empty;
+                        this.history_has_more = false;
+                    }
+                    Ok(commits) => {
+                        this.history_commits = commits;
+                        this.history_skip = HISTORY_PAGE_SIZE;
+                        this.history_has_more = this.history_commits.len() >= HISTORY_PAGE_SIZE;
+                        this.history_state = LoadState::Loaded(());
+                    }
+                    Err(error) => {
+                        this.history_state = LoadState::Error(git_error_notice(&error));
+                    }
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_more_history(&mut self, cx: &mut Context<Self>) {
+        if !self.history_has_more {
+            return;
+        }
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        let generation = self.history_generation;
+        let skip = self.history_skip;
+        Self::cancel_token(&mut self.history_more_cancellation);
+        let cancellation = CancellationToken::new();
+        self.history_more_cancellation = Some(cancellation.clone());
+        cx.notify();
+
+        let request_project = project.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move {
+                git_log_cancellable(&project, HISTORY_PAGE_SIZE, skip, &cancellation)
+            });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.history_generation != generation
+                    || this.selected_project() != Some(&request_project)
+                {
+                    return;
+                }
+                this.history_more_cancellation = None;
+                match result {
+                    Ok(commits) => {
+                        let count = commits.len();
+                        this.history_commits.extend(commits);
+                        this.history_skip = this.history_skip.saturating_add(count);
+                        if count < HISTORY_PAGE_SIZE {
+                            this.history_has_more = false;
+                        }
+                    }
+                    Err(_) => {
+                        this.history_has_more = false;
+                    }
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn load_git_diff_inner(&mut self, quiet: bool, cx: &mut Context<Self>) {
@@ -1524,6 +1665,7 @@ impl DevHubLite {
             CommandId::ShowFiles => self.set_activity(Activity::Files, window, cx),
             CommandId::ShowSearch => self.set_activity(Activity::Search, window, cx),
             CommandId::ShowGit => self.set_activity(Activity::Git, window, cx),
+            CommandId::ShowHistory => self.set_activity(Activity::History, window, cx),
             CommandId::RefreshGit => self.load_git_status(cx),
             CommandId::StageSelectedChange => {
                 if let Some(selection) = &self.git_selection {
@@ -3004,6 +3146,13 @@ impl DevHubLite {
                 self.start_git_auto_refresh(cx);
                 window.focus(&self.focus_handle);
             }
+            Activity::History => {
+                self.context_pane_visible = true;
+                if matches!(self.history_state, LoadState::Idle) {
+                    self.load_history(cx);
+                }
+                window.focus(&self.focus_handle);
+            }
             _ => window.focus(&self.focus_handle),
         }
         cx.notify();
@@ -3077,7 +3226,7 @@ impl DevHubLite {
     ) {
         if !matches!(
             self.activity,
-            Activity::Files | Activity::Search | Activity::Git
+            Activity::Files | Activity::Search | Activity::Git | Activity::History
         ) {
             return;
         }
@@ -3384,6 +3533,7 @@ impl DevHubLite {
             Activity::Files => self.files_content(theme, window, cx),
             Activity::Search => self.search_content(theme, window, cx),
             Activity::Git => self.git_content(theme, window, cx),
+            Activity::History => self.commit_history_content(theme, window, cx),
         }
     }
 
@@ -5036,6 +5186,418 @@ impl DevHubLite {
             .into_any_element()
     }
 
+    fn commit_history_content(
+        &self,
+        theme: Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let app = cx.entity();
+        let dragging = self.resize_target == Some(ResizeTarget::WorkspaceContext);
+
+        if matches!(self.history_state, LoadState::Idle) {
+            return workbench_message("select a project to view history", theme.text_disabled);
+        }
+        if matches!(self.history_state, LoadState::Loading) && self.history_commits.is_empty() {
+            return workbench_message("loading commit history...", theme.text_disabled);
+        }
+        if let LoadState::Error(ref error) = self.history_state {
+            return workbench_message(error.clone(), theme.error);
+        }
+        if self.history_commits.is_empty() {
+            return workbench_message("no commits", theme.text_muted);
+        }
+
+        let selected = self.history_selected;
+
+        let app_handle = app.clone();
+        let commit_list = div()
+            .id("history-list")
+            .min_h_0()
+            .flex_1()
+            .overflow_y_scroll()
+            .children(
+                self.history_commits.iter().enumerate().map(|(index, commit)| {
+                let app = app.clone();
+                let hash_short = commit.hash.chars().take(7).collect::<String>();
+                let is_selected = selected == Some(index);
+                let bg = if is_selected {
+                    theme.surface_selected
+                } else {
+                    theme.sidebar_background
+                };
+                div()
+                    .id(("history-commit", index))
+                    .h(px(36.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.35))
+                    .cursor_pointer()
+                    .bg(bg)
+                    .hover(move |style| {
+                        if !is_selected {
+                            style.bg(theme.surface_hover)
+                        } else {
+                            style
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(9.0))
+                                    .text_color(theme.accent)
+                                    .child(hash_short),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text)
+                                    .child(commit.message.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(8.0))
+                                    .text_color(theme.text_disabled)
+                                    .child(commit.author.clone()),
+                            )
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(8.0))
+                                    .text_color(theme.text_muted)
+                                    .child(commit.date.clone()),
+                            ),
+                    )
+                    .on_click(move |_, _window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.history_selected = Some(index);
+                            this.history_open_error = None;
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(
+                self.history_has_more.then(|| {
+                    div()
+                        .h(px(36.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .px_2()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.surface_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_event, _window, cx| {
+                                app_handle.update(cx, |this, cx| {
+                                    this.load_more_history(cx);
+                                });
+                            },
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child("show more"),
+                        )
+                        .into_any_element()
+                })
+            ));
+
+        let context = div()
+            .w(px(self.context_width_px))
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
+            .bg(theme.sidebar_background)
+            .border_r_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .size_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(30.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(
+                                Icon::new(HistoryIcon)
+                                    .size(px(13.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(10.0))
+                                    .text_color(theme.text)
+                                    .child(format!("Commits  {}", self.history_commits.len())),
+                            ),
+                    )
+                    .child(commit_list),
+            );
+
+        let handle = div()
+            .id("history-split-handle")
+            .w(px(4.0))
+            .flex_shrink_0()
+            .bg(if dragging { theme.focus } else { theme.border })
+            .hover(move |style| style.bg(theme.focus))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.resize_target = Some(ResizeTarget::WorkspaceContext);
+                    cx.notify();
+                }),
+            );
+
+        let detail = match selected.and_then(|i| self.history_commits.get(i)) {
+            Some(commit) => {
+                self.commit_detail_panel(commit, theme, cx)
+            }
+            None => workbench_message("select a commit for details", theme.text_disabled),
+        };
+
+        div()
+            .id("history-split-pane")
+            .size_full()
+            .flex()
+            .flex_row()
+            .min_h_0()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.resize_target == Some(ResizeTarget::WorkspaceContext) {
+                        this.resize_target = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.resize_target == Some(ResizeTarget::WorkspaceContext) {
+                    let raw: f32 = event.position.x.into();
+                    this.context_width_px = raw.clamp(180.0, 460.0);
+                    cx.notify();
+                }
+            }))
+            .when(self.context_pane_visible, |pane| {
+                pane.child(context).child(handle)
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_1()
+                    .child(detail),
+            )
+            .into_any_element()
+    }
+
+    fn commit_detail_panel(
+        &self,
+        commit: &CommitEntry,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hash_short: String = commit.hash.chars().take(7).collect();
+        let hash_long = &commit.hash;
+        let files_count = commit.files.len();
+
+        let github_url =
+            self.selected_project()
+                .and_then(|proj| {
+                    proj.git_remote
+                        .as_ref()
+                        .and_then(|remote| git_remote_to_github_url(remote, hash_long))
+                });
+
+        let app = cx.entity();
+
+        div()
+            .id("commit-detail")
+            .size_full()
+            .overflow_y_scroll()
+            .bg(theme.panel_background)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text)
+                                    .child(commit.message.clone()),
+                            )
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(9.0))
+                                    .text_color(theme.text_muted)
+                                    .child(format!("{hash_short} · {author} · {date}",
+                                        author = commit.author,
+                                        date = commit.date,
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .bg(theme.border),
+                    )
+                    .child(
+                        div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_disabled)
+                            .child(format!("{files_count} file(s) changed")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .children(commit.files.iter().map(|file| {
+                                let parts: Vec<&str> = file.splitn(3, '\t').collect();
+                                let additions: usize = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                                let deletions: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                                let path = parts.get(2).unwrap_or(&"").to_string();
+                                div()
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(9.0))
+                                            .text_color(theme.success)
+                                            .child(format!("+{additions}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(9.0))
+                                            .text_color(theme.error)
+                                            .child(format!("-{deletions}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(10.0))
+                                            .text_color(theme.text_muted)
+                                            .child(path),
+                                    )
+                                    .into_any_element()
+                            })),
+                    )
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .bg(theme.border),
+                    )
+                    .child(
+                        div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(8.0))
+                            .text_color(theme.text_muted)
+                            .child(format!("Full hash: {hash_long}")),
+                    )
+                    .when_some(github_url.as_ref(), |panel, url: &String| {
+                        let url = url.clone();
+                        let app = app.clone();
+                        panel.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .cursor_pointer()
+                                        .child(
+                                            div()
+                                                .font_family(MONO_FONT)
+                                                .text_size(px(9.0))
+                                                .text_color(theme.accent)
+                                                .child("view on github"),
+                                        )
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            move |_event, _window, cx| {
+                                                let url = url.clone();
+                                                let command = if cfg!(target_os = "windows") {
+                                                    "explorer"
+                                                } else if cfg!(target_os = "macos") {
+                                                    "open"
+                                                } else {
+                                                    "xdg-open"
+                                                };
+                                                if let Err(error) = std::process::Command::new(command).arg(&url).spawn() {
+                                                    app.update(cx, |this, cx| {
+                                                        this.history_open_error = Some(error.to_string());
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            },
+                                        ),
+                                )
+                                .when_some(self.history_open_error.as_ref(), |panel, error| {
+                                    panel.child(
+                                        div()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(8.0))
+                                            .text_color(theme.error)
+                                            .child(error.clone()),
+                                    )
+                                }),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn project_catalog_panel(
         &self,
         theme: Theme,
@@ -5223,6 +5785,7 @@ impl DevHubLite {
                 Activity::Files => Icon::new(IconName::FolderOpen),
                 Activity::Search => Icon::new(IconName::Search),
                 Activity::Git => Icon::new(GitBranchIcon),
+                Activity::History => Icon::new(HistoryIcon),
             };
             let app = app.clone();
             navigation = navigation.child(
@@ -6784,6 +7347,7 @@ pub(crate) fn run() {
             KeyBinding::new("ctrl-3", ShowFiles, Some("DevHub")),
             KeyBinding::new("ctrl-4", ShowSearch, Some("DevHub")),
             KeyBinding::new("ctrl-5", ShowGit, Some("DevHub")),
+            KeyBinding::new("ctrl-6", ShowHistory, Some("DevHub")),
             KeyBinding::new("ctrl-b", ToggleContextPane, Some("DevHub")),
             KeyBinding::new("up", SelectPreviousProject, Some("Input && DevHubLauncher")),
             KeyBinding::new("down", SelectNextProject, Some("Input && DevHubLauncher")),

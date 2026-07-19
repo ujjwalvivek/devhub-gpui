@@ -4,10 +4,11 @@ pub enum Activity {
     Files,
     Search,
     Git,
+    History,
 }
 
 impl Activity {
-    pub const ALL: [Self; 4] = [Self::Overview, Self::Files, Self::Search, Self::Git];
+    pub const ALL: [Self; 5] = [Self::Overview, Self::Files, Self::Search, Self::Git, Self::History];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -15,6 +16,7 @@ impl Activity {
             Self::Files => "Files",
             Self::Search => "Search",
             Self::Git => "Git",
+            Self::History => "History",
         }
     }
 }
@@ -35,7 +37,7 @@ mod tests {
     fn activities_are_project_workspace_modes() {
         assert_eq!(
             Activity::ALL.map(Activity::label),
-            ["Overview", "Files", "Search", "Git"]
+            ["Overview", "Files", "Search", "Git", "History"]
         );
     }
 

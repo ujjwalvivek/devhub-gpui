@@ -7,6 +7,7 @@ pub enum CommandId {
     ShowFiles,
     ShowSearch,
     ShowGit,
+    ShowHistory,
     RefreshGit,
     StageSelectedChange,
     StageAllChanges,
@@ -37,7 +38,7 @@ pub struct CommandSpec {
     pub shortcut: Option<&'static str>,
 }
 
-pub const COMMANDS: [CommandSpec; 25] = [
+pub const COMMANDS: [CommandSpec; 26] = [
     CommandSpec {
         id: CommandId::ToggleProjectCatalog,
         title: "Toggle Project Catalog",
@@ -67,6 +68,12 @@ pub const COMMANDS: [CommandSpec; 25] = [
         title: "Go to Git Changes",
         category: "Navigation",
         shortcut: Some("Ctrl+5"),
+    },
+    CommandSpec {
+        id: CommandId::ShowHistory,
+        title: "Go to Commit History",
+        category: "Navigation",
+        shortcut: None,
     },
     CommandSpec {
         id: CommandId::RefreshGit,

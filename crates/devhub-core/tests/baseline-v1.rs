@@ -10,7 +10,7 @@ const PROJECT_COUNT: usize = 10_000;
 const SCAN_DIRECTORY_COUNT: usize = 500;
 
 #[test]
-#[ignore = "manual release-mode Milestone 0 measurement"]
+#[ignore = "manual release-mode measurement"]
 fn measure_cache_and_local_scan_baseline() {
     let root = unique_temp_dir("core-baseline");
     let state = root.join("state");
