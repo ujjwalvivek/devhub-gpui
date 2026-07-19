@@ -4410,7 +4410,10 @@ impl DevHubLite {
                     .bg(theme.panel_background)
                     .font_family(MONO_FONT)
                     .text_size(px(10.0))
-                    .children(lines.into_iter().enumerate().map(|(index, line)| {
+                    .children(lines.into_iter().enumerate().filter_map(|(index, line)| {
+                        if matches!(line.kind, DiffLineKind::FileHeader | DiffLineKind::Metadata | DiffLineKind::HunkHeader) {
+                            return None;
+                        }
                         let (background, foreground) = match line.kind {
                             DiffLineKind::Addition => (theme.success.opacity(0.14), theme.success),
                             DiffLineKind::Deletion => (theme.error.opacity(0.14), theme.error),
@@ -4419,24 +4422,31 @@ impl DevHubLite {
                             DiffLineKind::Context => (theme.panel_background, theme.text_muted),
                             DiffLineKind::Metadata => (theme.panel_background, theme.text_disabled),
                         };
-                        div()
-                            .id(("git-diff-line", index))
-                            .h(px(19.0))
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .bg(background)
-                            .text_color(foreground)
-                            .child(diff_gutter_number(line.old_line, theme))
-                            .child(diff_gutter_number(line.new_line, theme))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .pl_2()
-                                    .pr_4()
-                                    .whitespace_nowrap()
-                                    .child(line.text),
-                            )
+                        Some(
+                            div()
+                                .id(("git-diff-line", index))
+                                .h(px(19.0))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .bg(background)
+                                .text_color(foreground)
+                                .child(diff_gutter_number(line.old_line, theme))
+                                .child(diff_gutter_number(line.new_line, theme))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .pl_2()
+                                        .pr_4()
+                                        .whitespace_nowrap()
+                                        .child(match line.kind {
+                                            DiffLineKind::Addition | DiffLineKind::Deletion | DiffLineKind::Context
+                                                if line.text.len() > 1 => line.text[1..].to_string(),
+                                            _ => line.text.clone(),
+                                        }),
+                                )
+                                .into_any_element(),
+                        )
                     }))
                     .when(truncated, |diff| {
                         diff.child(

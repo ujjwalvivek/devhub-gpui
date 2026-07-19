@@ -309,9 +309,10 @@ pub fn git_diff_cancellable(
         let contents = read_project_file_cancellable(project, &absolute_path, cancellation)
             .map_err(|error| classify_error(error, project, CommandClass::Local))?;
         let path = change.path.to_string_lossy();
+        let lines: Vec<&str> = contents.lines().collect();
         let mut diff =
-            format!("diff --git a/{path} b/{path}\nnew file\n--- /dev/null\n+++ b/{path}\n");
-        for line in contents.lines() {
+            format!("diff --git a/{path} b/{path}\nnew file\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n", lines.len());
+        for line in &lines {
             diff.push('+');
             diff.push_str(line);
             diff.push('\n');
