@@ -21,11 +21,12 @@ pub use discovery::{
     ProjectType,
 };
 pub use git::{
-    git_commit_cancellable, git_diff_cancellable, git_discard_cancellable, git_fetch_cancellable,
-    git_push_cancellable, git_stage_all_cancellable, git_stage_cancellable, git_status,
-    git_status_cancellable, git_status_summary_cancellable, git_unstage_all_cancellable,
-    git_unstage_cancellable, GitDiffKind, GitError, GitErrorKind, GitFileChange, GitLineStats,
-    GitOperationResult, GitStatus,
+    git_branches_cancellable, git_commit_cancellable, git_diff_cancellable,
+    git_discard_cancellable, git_fetch_cancellable, git_push_cancellable,
+    git_stage_all_cancellable, git_stage_cancellable, git_status, git_status_cancellable,
+    git_status_summary_cancellable, git_switch_branch_cancellable, git_unstage_all_cancellable,
+    git_unstage_cancellable, GitBranch, GitDiffKind, GitError, GitErrorKind, GitFileChange,
+    GitLineStats, GitOperationResult, GitStatus,
 };
 pub use persistence::{
     PersistenceEvent, PersistenceFailure, PersistenceOperation, PersistenceRecoverySource,

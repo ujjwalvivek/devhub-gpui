@@ -72,6 +72,12 @@ pub struct GitStatus {
     pub changes: Vec<GitFileChange>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+}
+
 impl GitStatus {
     pub fn staged_count(&self) -> usize {
         self.changes
@@ -253,6 +259,43 @@ pub fn git_status_summary_cancellable(
         cancellation,
     )?;
     parse_status(&output.stdout)
+}
+
+pub fn git_branches_cancellable(
+    project: &Project,
+    cancellation: &CancellationToken,
+) -> Result<Vec<GitBranch>, GitError> {
+    let output = run_git(
+        project,
+        &[
+            "for-each-ref",
+            "--format=%(HEAD)%09%(refname:short)%00",
+            "refs/heads",
+        ],
+        CommandClass::Local,
+        cancellation,
+    )?;
+    parse_branches(&output.stdout)
+}
+
+pub fn git_switch_branch_cancellable(
+    project: &Project,
+    branch: &str,
+    cancellation: &CancellationToken,
+) -> Result<GitOperationResult, GitError> {
+    if branch.trim().is_empty() || branch.chars().any(char::is_control) {
+        return Err(GitError::new(
+            GitErrorKind::Validation,
+            "Git branch name is invalid",
+        ));
+    }
+    run_git(
+        project,
+        &["switch", "--", branch],
+        CommandClass::Local,
+        cancellation,
+    )?;
+    Ok(operation_result(format!("Switched to {branch}.")))
 }
 
 pub fn git_diff_cancellable(
@@ -757,6 +800,28 @@ fn parse_status(output: &[u8]) -> Result<GitStatus, GitError> {
     })
 }
 
+fn parse_branches(output: &[u8]) -> Result<Vec<GitBranch>, GitError> {
+    let output = std::str::from_utf8(output)
+        .map_err(|_| GitError::new(GitErrorKind::CommandFailed, "Git branch name is not UTF-8"))?;
+    output
+        .split('\0')
+        .map(|record| record.trim_matches(['\r', '\n']))
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let Some((head, name)) = record.split_once('\t') else {
+                return Err(GitError::new(
+                    GitErrorKind::CommandFailed,
+                    "Git branch list returned a malformed record",
+                ));
+            };
+            Ok(GitBranch {
+                name: name.to_string(),
+                current: head.starts_with('*'),
+            })
+        })
+        .collect()
+}
+
 fn parse_branch_header(header: &[u8]) -> (Option<String>, Option<String>, usize, usize) {
     let header = String::from_utf8_lossy(header);
     let header = header
@@ -978,6 +1043,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_branch_list_with_current_marker() {
+        let branches = parse_branches(b" \tfeature\0*\tmain\0").unwrap();
+        assert_eq!(
+            branches,
+            vec![
+                GitBranch {
+                    name: "feature".into(),
+                    current: false,
+                },
+                GitBranch {
+                    name: "main".into(),
+                    current: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn network_errors_have_a_concise_status() {
         let project = test_project(PathBuf::from("repo"));
         let error = classify_error(
@@ -1086,6 +1169,35 @@ mod tests {
             .find(|change| change.path == Path::new("large-untracked.txt"))
             .unwrap();
         assert_eq!(large.unstaged_lines, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lists_and_switches_existing_local_branches() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let root = test_directory("git-branches");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        run_test_git(&root, &["init", "-q"]);
+        run_test_git(&root, &["config", "user.name", "DevHub Test"]);
+        run_test_git(&root, &["config", "user.email", "devhub@example.invalid"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        run_test_git(&root, &["add", "tracked.txt"]);
+        run_test_git(&root, &["commit", "-qm", "initial"]);
+        run_test_git(&root, &["branch", "feature"]);
+
+        let project = test_project(root.clone());
+        let cancellation = CancellationToken::new();
+        let branches = git_branches_cancellable(&project, &cancellation).unwrap();
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().any(|branch| branch.name == "feature"));
+        git_switch_branch_cancellable(&project, "feature", &cancellation).unwrap();
+        assert!(git_branches_cancellable(&project, &cancellation)
+            .unwrap()
+            .iter()
+            .any(|branch| branch.name == "feature" && branch.current));
         let _ = std::fs::remove_dir_all(root);
     }
 

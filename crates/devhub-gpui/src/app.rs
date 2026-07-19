@@ -8,17 +8,19 @@ use crate::ui::{
     window_control, workbench_message,
 };
 use devhub_core::{
-    cache_path, git_commit_cancellable, git_diff_cancellable, git_discard_cancellable,
-    git_fetch_cancellable, git_push_cancellable, git_stage_all_cancellable, git_stage_cancellable,
-    git_status_cancellable, git_status_summary_cancellable, git_unstage_all_cancellable,
+    cache_path, git_branches_cancellable, git_commit_cancellable, git_diff_cancellable,
+    git_discard_cancellable, git_fetch_cancellable, git_push_cancellable,
+    git_stage_all_cancellable, git_stage_cancellable, git_status_cancellable,
+    git_status_summary_cancellable, git_switch_branch_cancellable, git_unstage_all_cancellable,
     git_unstage_cancellable, list_local_subdirs, list_project_tree_cancellable,
     list_remote_subdirs_cancellable, load_projects_with_diagnostics, local_roots,
     open_project_in_zed, read_project_file_cancellable, read_project_readme_cancellable,
     save_projects_with_diagnostics, scan_directories_cancellable, scan_remote_host_cancellable,
     search_project_content_cancellable, sort_projects, validate_remote_path, validate_ssh_host,
-    zed_ssh_uri, AppearanceMode, CancellationToken, Config, DirectoryEntry, FileEntry, GitDiffKind,
-    GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus, PersistenceEvent,
-    PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
+    zed_ssh_uri, AppearanceMode, CancellationToken, Config, DirectoryEntry, FileEntry, GitBranch,
+    GitDiffKind, GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus,
+    PersistenceEvent, PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit,
+    ThemeId, TreeListing,
 };
 use devhub_gpui::{
     filtered_commands, filtered_project_indices, filtered_themes, has_scan_sources,
@@ -149,6 +151,9 @@ struct DevHubLite {
     git_status_state: LoadState<GitStatus>,
     git_status_generation: u64,
     git_status_cancellation: Option<CancellationToken>,
+    git_branches_state: LoadState<Vec<GitBranch>>,
+    git_branches_generation: u64,
+    git_branches_cancellation: Option<CancellationToken>,
     git_refresh_generation: u64,
     git_selection: Option<GitSelection>,
     git_diff_state: LoadState<String>,
@@ -186,6 +191,7 @@ pub(crate) enum WindowCommand {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LauncherMode {
+    Branches,
     Commands,
     Projects,
     Themes,
@@ -233,6 +239,7 @@ enum GitAction {
     Commit { message: String, amend: bool },
     Fetch,
     Push { set_upstream: bool },
+    SwitchBranch(String),
 }
 
 enum LoadState<T> {
@@ -380,6 +387,9 @@ impl DevHubLite {
             git_status_state: LoadState::Idle,
             git_status_generation: 0,
             git_status_cancellation: None,
+            git_branches_state: LoadState::Idle,
+            git_branches_generation: 0,
+            git_branches_cancellation: None,
             git_refresh_generation: 0,
             git_selection: None,
             git_diff_state: LoadState::Idle,
@@ -429,6 +439,7 @@ impl DevHubLite {
         Self::cancel_token(&mut self.search_cancellation);
         Self::cancel_token(&mut self.readme_cancellation);
         Self::cancel_token(&mut self.git_status_cancellation);
+        Self::cancel_token(&mut self.git_branches_cancellation);
         Self::cancel_token(&mut self.git_diff_cancellation);
         Self::cancel_token(&mut self.git_operation_cancellation);
         self.tree_generation = self.tree_generation.wrapping_add(1);
@@ -447,6 +458,8 @@ impl DevHubLite {
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
         self.git_status_state = LoadState::Idle;
+        self.git_branches_generation = self.git_branches_generation.wrapping_add(1);
+        self.git_branches_state = LoadState::Idle;
         self.git_selection = None;
         self.git_diff_generation = self.git_diff_generation.wrapping_add(1);
         self.git_diff_state = LoadState::Idle;
@@ -721,6 +734,9 @@ impl DevHubLite {
                 .scroll_to_item(row, ScrollStrategy::Center);
         }
         self.reset_workspace(cx);
+        if project.has_git {
+            self.load_git_branches(cx);
+        }
         match self.activity {
             Activity::Overview => self.load_readme(cx),
             Activity::Files => self.load_tree(cx),
@@ -991,6 +1007,57 @@ impl DevHubLite {
         self.load_git_diff_inner(false, cx);
     }
 
+    fn load_git_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        self.git_branches_generation = self.git_branches_generation.wrapping_add(1);
+        let generation = self.git_branches_generation;
+        Self::cancel_token(&mut self.git_branches_cancellation);
+        let cancellation = CancellationToken::new();
+        self.git_branches_cancellation = Some(cancellation.clone());
+        if !matches!(self.git_branches_state, LoadState::Loaded(_)) {
+            self.git_branches_state = LoadState::Loading;
+        }
+        cx.notify();
+
+        let request_project = project.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { git_branches_cancellable(&project, &cancellation) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.git_branches_generation != generation
+                    || this.selected_project() != Some(&request_project)
+                {
+                    return;
+                }
+                this.git_branches_cancellation = None;
+                this.git_branches_state = match result {
+                    Ok(branches) if branches.is_empty() => LoadState::Empty,
+                    Ok(branches) => LoadState::Loaded(branches),
+                    Err(error) => LoadState::Error(git_error_notice(&error)),
+                };
+                if this.launcher == Some(LauncherMode::Branches) {
+                    this.launcher_selected = this
+                        .launcher_branches()
+                        .iter()
+                        .position(|branch| branch.current)
+                        .unwrap_or_default();
+                    this.launcher_scroll.scroll_to_item(this.launcher_selected);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_branch_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_launcher(LauncherMode::Branches, window, cx);
+        self.load_git_branches(cx);
+    }
+
     fn load_git_diff_inner(&mut self, quiet: bool, cx: &mut Context<Self>) {
         let (Some(project), Some(selection)) =
             (self.selected_project().cloned(), self.git_selection.clone())
@@ -1196,19 +1263,20 @@ impl DevHubLite {
         self.git_context_menu = None;
         self.git_notice = Some(GitNotice {
             text: match &action {
-                GitAction::Fetch => "Fetching remotes...",
-                GitAction::Push { .. } => "Pushing current branch...",
-                GitAction::Commit { amend: true, .. } => "Amending commit...",
-                GitAction::Commit { .. } => "Creating commit...",
-                _ => "Updating working tree...",
-            }
-            .into(),
+                GitAction::Fetch => "Fetching remotes...".into(),
+                GitAction::Push { .. } => "Pushing current branch...".into(),
+                GitAction::SwitchBranch(branch) => format!("Switching to {branch}..."),
+                GitAction::Commit { amend: true, .. } => "Amending commit...".into(),
+                GitAction::Commit { .. } => "Creating commit...".into(),
+                _ => "Updating working tree...".into(),
+            },
             tone: GitNoticeTone::Working,
             automatic: false,
         });
         cx.notify();
 
         let clears_commit_message = matches!(action, GitAction::Commit { .. });
+        let refreshes_branches = matches!(action, GitAction::SwitchBranch(_));
         let request_project = project.clone();
         let task = cx.background_executor().spawn(async move {
             match action {
@@ -1227,6 +1295,9 @@ impl DevHubLite {
                 GitAction::Fetch => git_fetch_cancellable(&project, &cancellation),
                 GitAction::Push { set_upstream } => {
                     git_push_cancellable(&project, set_upstream, &cancellation)
+                }
+                GitAction::SwitchBranch(branch) => {
+                    git_switch_branch_cancellable(&project, &branch, &cancellation)
                 }
             }
         });
@@ -1250,6 +1321,9 @@ impl DevHubLite {
                             this.clear_git_commit_message(cx);
                         }
                         this.reload_git_status_after_operation(cx);
+                        if refreshes_branches {
+                            this.load_git_branches(cx);
+                        }
                     }
                     Err(error) => {
                         this.git_notice = Some(GitNotice {
@@ -1288,8 +1362,21 @@ impl DevHubLite {
         self.git_operation_cancellation.is_some()
     }
 
+    fn launcher_branches(&self) -> Vec<GitBranch> {
+        let LoadState::Loaded(branches) = &self.git_branches_state else {
+            return Vec::new();
+        };
+        let query = self.launcher_query.trim().to_lowercase();
+        branches
+            .iter()
+            .filter(|branch| query.is_empty() || branch.name.to_lowercase().contains(&query))
+            .cloned()
+            .collect()
+    }
+
     fn open_launcher(&mut self, mode: LauncherMode, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
+        self.git_context_menu = None;
         self.project_catalog_open = false;
         self.resize_target = None;
         self.launcher = Some(mode);
@@ -1303,6 +1390,11 @@ impl DevHubLite {
             input.focus(window, cx);
         });
         self.launcher_selected = match mode {
+            LauncherMode::Branches => self
+                .launcher_branches()
+                .iter()
+                .position(|branch| branch.current)
+                .unwrap_or_default(),
             LauncherMode::Projects => self
                 .selected
                 .and_then(|current| {
@@ -1337,6 +1429,7 @@ impl DevHubLite {
 
     fn launcher_item_count(&self) -> usize {
         match self.launcher {
+            Some(LauncherMode::Branches) => self.launcher_branches().len(),
             Some(LauncherMode::Commands) => self.launcher_commands().len(),
             Some(LauncherMode::Projects) => self.launcher_project_indices().len(),
             Some(LauncherMode::Themes) => filtered_themes(&self.launcher_query).len(),
@@ -1360,6 +1453,19 @@ impl DevHubLite {
 
     fn accept_launcher_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.launcher {
+            Some(LauncherMode::Branches) => {
+                let Some(branch) = self
+                    .launcher_branches()
+                    .get(self.launcher_selected)
+                    .cloned()
+                else {
+                    return;
+                };
+                self.close_launcher(window, cx);
+                if !branch.current && !self.git_operation_running() {
+                    self.run_git_action(GitAction::SwitchBranch(branch.name), cx);
+                }
+            }
             Some(LauncherMode::Commands) => {
                 let Some(command) = self
                     .launcher_commands()
@@ -5157,6 +5263,7 @@ impl DevHubLite {
         };
         let app = cx.entity();
         let title = match mode {
+            LauncherMode::Branches => "Branches",
             LauncherMode::Commands => "Commands",
             LauncherMode::Projects => "Projects",
             LauncherMode::Themes => "Themes",
@@ -5164,7 +5271,74 @@ impl DevHubLite {
         let app_for_close = app.clone();
         let app_for_backdrop = app.clone();
 
+        let (empty_message, empty_color) = if mode == LauncherMode::Branches {
+            match &self.git_branches_state {
+                LoadState::Loading | LoadState::Idle => {
+                    ("loading branches...".to_string(), theme.text_disabled)
+                }
+                LoadState::Error(error) => (error.clone(), theme.error),
+                LoadState::Empty => ("no local branches".to_string(), theme.text_muted),
+                LoadState::Loaded(_) => ("no matches".to_string(), theme.text_muted),
+            }
+        } else {
+            ("no matches".to_string(), theme.text_muted)
+        };
+
         let rows = match mode {
+            LauncherMode::Branches => self
+                .launcher_branches()
+                .into_iter()
+                .enumerate()
+                .map(|(index, branch)| {
+                    let app = app.clone();
+                    div()
+                        .id(("branch", index))
+                        .h(px(26.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.35))
+                        .cursor_pointer()
+                        .bg(if self.launcher_selected == index {
+                            theme.surface_selected
+                        } else {
+                            theme.surface_background
+                        })
+                        .hover(move |style| style.bg(theme.surface_hover))
+                        .child(if branch.current {
+                            Icon::new(IconName::Check)
+                                .size(px(12.0))
+                                .text_color(theme.success)
+                                .into_any_element()
+                        } else {
+                            Icon::new(GitBranchIcon)
+                                .size(px(12.0))
+                                .text_color(theme.text_disabled)
+                                .into_any_element()
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.0))
+                                .text_color(theme.text)
+                                .child(branch.name),
+                        )
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.launcher_selected = index;
+                                this.accept_launcher_selection(window, cx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
             LauncherMode::Commands => self
                 .launcher_commands()
                 .into_iter()
@@ -5365,7 +5539,12 @@ impl DevHubLite {
                     .key_context("DevHubLauncher")
                     .top(px(TITLEBAR_HEIGHT + 4.0))
                     .left(px(36.0))
-                    .w(px(390.0))
+                    .w(match mode {
+                        LauncherMode::Branches => px(350.0),
+                        LauncherMode::Commands => px(350.0),
+                        LauncherMode::Projects => px(350.0),
+                        LauncherMode::Themes => px(350.0),
+                    })
                     .max_h(px(310.0))
                     .flex()
                     .flex_col()
@@ -5420,7 +5599,7 @@ impl DevHubLite {
                             .overflow_y_scroll()
                             .track_scroll(&self.launcher_scroll)
                             .when(rows.is_empty(), |list| {
-                                list.child(workbench_message("no matches", theme.text_muted))
+                                list.child(workbench_message(empty_message, empty_color))
                             })
                             .children(rows),
                     ),
@@ -5517,6 +5696,11 @@ impl Render for DevHubLite {
             .foreground(theme.text)
             .hover(theme.surface_hover)
             .active(theme.surface_selected);
+        let branch_pill_style = ButtonCustomVariant::new(cx)
+            .color(theme.surface_selected)
+            .foreground(theme.text_muted)
+            .hover(theme.surface_hover)
+            .active(theme.surface_selected);
         let window_active = window.is_window_active();
         let window_maximized = window.is_maximized();
         let project_list_focused = self.focus_handle.is_focused(window);
@@ -5542,10 +5726,23 @@ impl Render for DevHubLite {
             .selected_project()
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "devhub".to_string());
-        let titlebar_git_branch = match &self.git_status_state {
-            LoadState::Loaded(status) if !self.show_settings => status.branch.clone(),
-            _ => None,
-        };
+        let titlebar_git_branch = (!self.show_settings
+            && self
+                .selected_project()
+                .is_some_and(|project| project.has_git))
+        .then(|| {
+            if let LoadState::Loaded(status) = &self.git_status_state {
+                if let Some(branch) = &status.branch {
+                    return branch.clone();
+                }
+            }
+            if let LoadState::Loaded(branches) = &self.git_branches_state {
+                if let Some(branch) = branches.iter().find(|branch| branch.current) {
+                    return branch.name.clone();
+                }
+            }
+            "Git".to_string()
+        });
         let total_count = self.scan.projects.len();
         let visible_count = filtered_indices.len();
         let filter_active = !self.filter_query.is_empty();
@@ -5839,32 +6036,24 @@ impl Render for DevHubLite {
                             })
                     })
                     .when_some(titlebar_git_branch, |titlebar, branch| {
+                        let app = cx.entity();
                         titlebar.child(
-                            div()
+                            Button::new("branch-switcher")
+                                .icon(GitBranchIcon)
+                                .label(branch)
+                                .tooltip("Switch branch")
+                                .xsmall()
+                                .compact()
+                                .custom(branch_pill_style)
                                 .h(px(20.0))
                                 .max_w(px(170.0))
                                 .ml_1()
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .rounded_sm()
-                                .bg(theme.surface_selected)
-                                .child(
-                                    Icon::new(GitBranchIcon)
-                                        .size(px(11.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(10.0))
-                                        .text_color(theme.text_muted)
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .child(branch),
-                                ),
+                                .disabled(self.git_operation_running())
+                                .on_click(move |_, window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.open_branch_launcher(window, cx);
+                                    });
+                                }),
                         )
                     })
                     .child(
