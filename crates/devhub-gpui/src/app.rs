@@ -17,24 +17,37 @@ use devhub_core::{
     Project, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
-    accepts_manual_search_character, filtered_project_indices, has_scan_sources, language_for_path,
-    markdown_fenced_source, next_selection, omit_markdown_images, partition_local_scan_roots,
-    persistence_status_text, previous_selection, should_show_ftue, PersistenceHistory, ScanModel,
-    ScanState, Theme, MONO_FONT, UI_FONT,
+    filtered_commands, filtered_project_indices, filtered_themes, has_scan_sources,
+    language_for_path, markdown_fenced_source, next_selection, omit_markdown_images,
+    partition_local_scan_roots, persistence_status_text, previous_selection, scan_sources_changed,
+    should_show_ftue, visible_project_row, Activity, CommandId, CommandSpec, PersistenceHistory,
+    ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::highlighter::HighlightTheme;
 use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::text::{TextView, TextViewStyle};
-use gpui_component::{Icon, IconName};
+use gpui_component::{Disableable, Icon, IconName, IconNamed, Selectable, Sizable};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 const TITLEBAR_HEIGHT: f32 = 34.0;
 const PROJECT_ROW_HEIGHT: f32 = 30.0;
-const SIDEBAR_WIDTH: f32 = 260.0;
+const STATUSBAR_HEIGHT: f32 = 22.0;
+
+#[derive(Clone, Copy)]
+struct ZedIcon;
+
+impl IconNamed for ZedIcon {
+    fn path(self) -> SharedString {
+        "zed.svg".into()
+    }
+}
 
 actions!(
     devhub,
@@ -45,14 +58,23 @@ actions!(
         SelectLastProject,
         ScanCurrentFolder,
         OpenSelectedProject,
-        FocusProjectFilter
+        FocusProjectFilter,
+        ShowCommandPalette,
+        ShowProjectSwitcher,
+        ToggleProjectCatalog,
+        ShowOverview,
+        ShowFiles,
+        ShowSearch,
+        ToggleContextPane,
+        DismissLauncher,
+        AcceptLauncher
     ]
 );
 
 struct DevHubLite {
     scan: ScanModel,
     scan_cancellation: Option<CancellationToken>,
-    selected: Option<usize>,
+    selected: Option<usize>, // Stable index into scan.projects, never a filtered row.
     filter_query: String,
     launch_error: Option<String>,
     persistence_history: PersistenceHistory,
@@ -75,7 +97,9 @@ struct DevHubLite {
     remote_name_input: Entity<InputState>,
     remote_host_input: Entity<InputState>,
     remote_path_input: Entity<InputState>,
-    details_tab: DetailsTab,
+    activity: Activity,
+    project_catalog_open: bool,
+    context_pane_visible: bool,
     tree_state: LoadState<TreeListing>,
     tree_generation: u64,
     tree_cancellation: Option<CancellationToken>,
@@ -89,7 +113,15 @@ struct DevHubLite {
     pending_document_line: Option<usize>,
     copy_feedback: Option<String>,
     copy_feedback_generation: u64,
+    launcher: Option<LauncherMode>,
+    launcher_query: String,
+    launcher_selected: usize,
+    launcher_input: Entity<InputState>,
+    launcher_scroll: ScrollHandle,
+    _launcher_subscription: Subscription,
     search_query: String,
+    search_input: Entity<InputState>,
+    _search_subscription: Subscription,
     search_state: LoadState<Vec<SearchHit>>,
     search_generation: u64,
     search_cancellation: Option<CancellationToken>,
@@ -98,8 +130,9 @@ struct DevHubLite {
     readme_generation: u64,
     readme_cancellation: Option<CancellationToken>,
     readme_preview: bool,
-    tree_width_px: f32,
-    dragging_split: bool,
+    context_width_px: f32,
+    project_catalog_width_px: f32,
+    resize_target: Option<ResizeTarget>,
     context_menu: Option<(usize, f32, f32)>,
 }
 
@@ -111,10 +144,16 @@ pub(crate) enum WindowCommand {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DetailsTab {
-    Overview,
-    Files,
-    Search,
+enum LauncherMode {
+    Commands,
+    Projects,
+    Themes,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResizeTarget {
+    WorkspaceContext,
+    ProjectCatalog,
 }
 
 enum LoadState<T> {
@@ -145,6 +184,13 @@ impl DevHubLite {
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter projects"));
         let _filter_subscription =
             cx.subscribe_in(&filter_input, window, Self::on_filter_input_event);
+        let launcher_input = cx.new(|cx| InputState::new(window, cx).placeholder("Type to filter"));
+        let _launcher_subscription =
+            cx.subscribe_in(&launcher_input, window, Self::on_launcher_input_event);
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search file contents"));
+        let _search_subscription =
+            cx.subscribe_in(&search_input, window, Self::on_search_input_event);
         window.focus(&focus_handle);
 
         let mut startup_errors = Vec::new();
@@ -214,7 +260,9 @@ impl DevHubLite {
             remote_name_input,
             remote_host_input,
             remote_path_input,
-            details_tab: DetailsTab::Overview,
+            activity: Activity::Overview,
+            project_catalog_open: false,
+            context_pane_visible: true,
             tree_state: LoadState::Idle,
             tree_generation: 0,
             tree_cancellation: None,
@@ -228,7 +276,15 @@ impl DevHubLite {
             pending_document_line: None,
             copy_feedback: None,
             copy_feedback_generation: 0,
+            launcher: None,
+            launcher_query: String::new(),
+            launcher_selected: 0,
+            launcher_input,
+            launcher_scroll: ScrollHandle::new(),
+            _launcher_subscription,
             search_query: String::new(),
+            search_input,
+            _search_subscription,
             search_state: LoadState::Idle,
             search_generation: 0,
             search_cancellation: None,
@@ -237,16 +293,24 @@ impl DevHubLite {
             readme_generation: 0,
             readme_cancellation: None,
             readme_preview: true,
-            tree_width_px: 130.0,
-            dragging_split: false,
+            context_width_px: 210.0,
+            project_catalog_width_px: 276.0,
+            resize_target: None,
             context_menu: None,
         }
     }
 
-    fn select_project(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_project(
+        &mut self,
+        project_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus_handle);
         self.context_menu = None;
-        self.set_selected(index, cx);
+        self.project_catalog_open = false;
+        self.resize_target = None;
+        self.set_selected(project_index, cx);
     }
 
     fn reset_workspace(&mut self, cx: &mut Context<Self>) {
@@ -254,7 +318,6 @@ impl DevHubLite {
         Self::cancel_token(&mut self.file_cancellation);
         Self::cancel_token(&mut self.search_cancellation);
         Self::cancel_token(&mut self.readme_cancellation);
-        self.details_tab = DetailsTab::Overview;
         self.tree_generation = self.tree_generation.wrapping_add(1);
         self.tree_state = LoadState::Idle;
         self.expanded_dirs.clear();
@@ -264,7 +327,6 @@ impl DevHubLite {
         self.document_focused = false;
         self.pending_document_line = None;
         self.copy_feedback = None;
-        self.search_query.clear();
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_state = LoadState::Idle;
         self.readme_generation = self.readme_generation.wrapping_add(1);
@@ -278,49 +340,12 @@ impl DevHubLite {
         }
     }
 
-    fn has_active_operations(&self) -> bool {
-        self.scan_cancellation.is_some()
-            || self.picker_cancellation.is_some()
-            || self.tree_cancellation.is_some()
-            || self.file_cancellation.is_some()
-            || self.search_cancellation.is_some()
-            || self.readme_cancellation.is_some()
-    }
-
-    fn stop_active_operations(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let scan_was_active = self.scan_cancellation.is_some();
+    fn stop_scan(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scan_cancellation.is_none() {
+            return;
+        }
         Self::cancel_token(&mut self.scan_cancellation);
-        Self::cancel_token(&mut self.picker_cancellation);
-        Self::cancel_token(&mut self.tree_cancellation);
-        Self::cancel_token(&mut self.file_cancellation);
-        Self::cancel_token(&mut self.search_cancellation);
-        Self::cancel_token(&mut self.readme_cancellation);
-
-        if scan_was_active {
-            self.scan.cancel();
-        }
-        self.picker_generation = self.picker_generation.wrapping_add(1);
-        self.tree_generation = self.tree_generation.wrapping_add(1);
-        self.file_generation = self.file_generation.wrapping_add(1);
-        self.search_generation = self.search_generation.wrapping_add(1);
-        self.readme_generation = self.readme_generation.wrapping_add(1);
-
-        if matches!(self.picker_entries, LoadState::Loading) {
-            self.picker_entries = LoadState::Idle;
-        }
-        if matches!(self.tree_state, LoadState::Loading) {
-            self.tree_state = LoadState::Idle;
-        }
-        if matches!(self.file_state, LoadState::Loading) {
-            self.file_state = LoadState::Idle;
-        }
-        if matches!(self.search_state, LoadState::Loading) {
-            self.search_state = LoadState::Idle;
-        }
-        if matches!(self.readme_state, LoadState::Loading) {
-            self.readme_state = LoadState::Idle;
-        }
-        self.show_copy_feedback("CANCELLED", cx);
+        self.scan.cancel();
         cx.notify();
     }
 
@@ -346,11 +371,7 @@ impl DevHubLite {
         }
     }
 
-    fn toggle_pin(&mut self, filtered_index: usize, cx: &mut Context<Self>) {
-        let indices = self.filtered_indices();
-        let Some(&project_index) = indices.get(filtered_index) else {
-            return;
-        };
+    fn toggle_pin(&mut self, project_index: usize, cx: &mut Context<Self>) {
         let Some(project) = self.scan.projects.get(project_index) else {
             return;
         };
@@ -369,11 +390,7 @@ impl DevHubLite {
         self.config.hidden_projects.contains(&project.path)
     }
 
-    fn toggle_hide(&mut self, filtered_index: usize, cx: &mut Context<Self>) {
-        let indices = self.filtered_indices();
-        let Some(&project_index) = indices.get(filtered_index) else {
-            return;
-        };
+    fn toggle_hide(&mut self, project_index: usize, cx: &mut Context<Self>) {
         let Some(project) = self.scan.projects.get(project_index) else {
             return;
         };
@@ -386,6 +403,7 @@ impl DevHubLite {
         self.save_config();
         self.context_menu = None;
         self.selected = None;
+        self.reset_workspace(cx);
         cx.notify();
     }
 
@@ -403,11 +421,6 @@ impl DevHubLite {
         }
         self.save_config();
         cx.notify();
-    }
-
-    fn start_scan(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle);
-        self.begin_scan(window, cx);
     }
 
     fn scan_current_folder(
@@ -492,16 +505,29 @@ impl DevHubLite {
         .detach();
     }
 
-    fn set_selected(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.selected = Some(index);
-        self.project_scroll
-            .scroll_to_item(index, ScrollStrategy::Center);
+    fn set_selected(&mut self, project_index: usize, cx: &mut Context<Self>) {
+        if project_index >= self.scan.projects.len() {
+            return;
+        }
+        self.selected = Some(project_index);
+        if let Some(row) = visible_project_row(&self.filtered_indices(), self.selected) {
+            self.project_scroll
+                .scroll_to_item(row, ScrollStrategy::Center);
+        }
         self.reset_workspace(cx);
-        self.load_readme(cx);
+        match self.activity {
+            Activity::Overview => self.load_readme(cx),
+            Activity::Files => self.load_tree(cx),
+            Activity::Search => {}
+        }
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
-        let mut indices = filtered_project_indices(&self.scan.projects, &self.filter_query);
+        self.project_indices_for_query(&self.filter_query)
+    }
+
+    fn project_indices_for_query(&self, query: &str) -> Vec<usize> {
+        let mut indices = filtered_project_indices(&self.scan.projects, query);
         indices.retain(|&idx| {
             self.scan
                 .projects
@@ -520,6 +546,10 @@ impl DevHubLite {
             )
         });
         indices
+    }
+
+    fn launcher_project_indices(&self) -> Vec<usize> {
+        self.project_indices_for_query(&self.launcher_query)
     }
 
     fn on_filter_input_event(
@@ -546,6 +576,245 @@ impl DevHubLite {
         }
     }
 
+    fn on_launcher_input_event(
+        &mut self,
+        state: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                let query = state.read(cx).value().to_lowercase();
+                if query != self.launcher_query {
+                    self.launcher_query = query;
+                    self.launcher_selected = 0;
+                    self.launcher_scroll.scroll_to_item(0);
+                    self.preview_selected_theme(cx);
+                    cx.notify();
+                }
+            }
+            InputEvent::PressEnter { .. } => self.accept_launcher_selection(window, cx),
+            _ => {}
+        }
+    }
+
+    fn on_search_input_event(
+        &mut self,
+        state: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                Self::cancel_token(&mut self.search_cancellation);
+                self.search_query = state.read(cx).value().to_string();
+                self.search_generation = self.search_generation.wrapping_add(1);
+                self.search_state = LoadState::Idle;
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => self.execute_search(window, cx),
+            _ => {}
+        }
+    }
+
+    fn open_launcher(&mut self, mode: LauncherMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        self.project_catalog_open = false;
+        self.resize_target = None;
+        self.launcher = Some(mode);
+        self.launcher_query.clear();
+        if mode == LauncherMode::Themes {
+            self.pending_theme = self.config.theme;
+            self.pending_appearance = self.config.appearance;
+        }
+        self.launcher_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        self.launcher_selected = match mode {
+            LauncherMode::Projects => self
+                .selected
+                .and_then(|current| {
+                    self.launcher_project_indices()
+                        .iter()
+                        .position(|candidate| *candidate == current)
+                })
+                .unwrap_or_default(),
+            LauncherMode::Commands => 0,
+            LauncherMode::Themes => filtered_themes("")
+                .iter()
+                .position(|selection| {
+                    selection.is_active(self.config.theme, self.config.appearance)
+                })
+                .unwrap_or_default(),
+        };
+        self.launcher_scroll
+            .scroll_to_item(self.launcher_selected);
+        cx.notify();
+    }
+
+    fn close_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.launcher == Some(LauncherMode::Themes) {
+            self.pending_theme = self.config.theme;
+            self.pending_appearance = self.config.appearance;
+        }
+        self.launcher = None;
+        self.launcher_query.clear();
+        self.launcher_selected = 0;
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn launcher_item_count(&self) -> usize {
+        match self.launcher {
+            Some(LauncherMode::Commands) => self.launcher_commands().len(),
+            Some(LauncherMode::Projects) => self.launcher_project_indices().len(),
+            Some(LauncherMode::Themes) => filtered_themes(&self.launcher_query).len(),
+            None => 0,
+        }
+    }
+
+    fn preview_selected_theme(&mut self, cx: &mut Context<Self>) {
+        if self.launcher != Some(LauncherMode::Themes) {
+            return;
+        }
+        if let Some(selection) = filtered_themes(&self.launcher_query)
+            .get(self.launcher_selected)
+            .copied()
+        {
+            (self.pending_theme, self.pending_appearance) =
+                selection.preferences(self.config.theme);
+            cx.notify();
+        }
+    }
+
+    fn accept_launcher_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.launcher {
+            Some(LauncherMode::Commands) => {
+                let Some(command) = self
+                    .launcher_commands()
+                    .get(self.launcher_selected)
+                    .copied()
+                else {
+                    return;
+                };
+                self.close_launcher(window, cx);
+                self.execute_command(command.id, window, cx);
+            }
+            Some(LauncherMode::Projects) => {
+                let Some(&project_index) =
+                    self.launcher_project_indices().get(self.launcher_selected)
+                else {
+                    return;
+                };
+                self.close_launcher(window, cx);
+                self.show_settings = false;
+                self.clear_filter(window, cx);
+                self.set_selected(project_index, cx);
+            }
+            Some(LauncherMode::Themes) => {
+                let Some(selection) = filtered_themes(&self.launcher_query)
+                    .get(self.launcher_selected)
+                    .copied()
+                else {
+                    return;
+                };
+                let (theme, appearance) = selection.preferences(self.config.theme);
+                let mut config = self.config.clone();
+                config.theme = theme;
+                config.appearance = appearance;
+                match config.save_with_diagnostics() {
+                    Ok(report) => {
+                        self.persistence_history.record_events(report.events);
+                        self.config = config;
+                        self.pending_theme = theme;
+                        self.pending_appearance = appearance;
+                    }
+                    Err(error) => self.record_persistence_failure(error),
+                }
+                self.close_launcher(window, cx);
+            }
+            None => {}
+        }
+    }
+
+    fn execute_command(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.command_enabled(command) {
+            return;
+        }
+        match command {
+            CommandId::ToggleProjectCatalog => self.toggle_project_catalog_open(window, cx),
+            CommandId::ShowOverview => self.set_activity(Activity::Overview, window, cx),
+            CommandId::ShowFiles => self.set_activity(Activity::Files, window, cx),
+            CommandId::ShowSearch => self.set_activity(Activity::Search, window, cx),
+            CommandId::OpenInZed => self.launch_selected_in_zed(cx),
+            CommandId::OpenWith => self.launch_selected_with_picker(window, cx),
+            CommandId::ToggleProjectPin => {
+                if let Some(index) = self.selected {
+                    self.toggle_pin(index, cx);
+                }
+            }
+            CommandId::HideProject => {
+                if let Some(index) = self.selected {
+                    self.toggle_hide(index, cx);
+                }
+            }
+            CommandId::CopyProjectPath => {
+                if let Some(path) = self
+                    .selected_project()
+                    .map(|project| project.path.to_string_lossy().into_owned())
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(path));
+                    self.show_copy_feedback("COPIED PROJECT PATH", cx);
+                }
+            }
+            CommandId::RefreshProjects => self.begin_scan(window, cx),
+            CommandId::ToggleContextPane => {
+                self.context_pane_visible = !self.context_pane_visible;
+                cx.notify();
+            }
+            CommandId::ToggleReadmePreview => {
+                self.readme_preview = !self.readme_preview;
+                cx.notify();
+            }
+            CommandId::ToggleFileWrap => {
+                self.wrap_document = !self.wrap_document;
+                cx.notify();
+            }
+            CommandId::SelectTheme => self.open_launcher(LauncherMode::Themes, window, cx),
+            CommandId::ShowSettings => self.open_settings(window, cx),
+        }
+    }
+
+    fn command_enabled(&self, command: CommandId) -> bool {
+        match command {
+            CommandId::OpenInZed
+            | CommandId::OpenWith
+            | CommandId::ToggleProjectPin
+            | CommandId::HideProject
+            | CommandId::CopyProjectPath => self.selected_project().is_some(),
+            CommandId::ToggleReadmePreview => {
+                self.selected_project().is_some() && self.activity == Activity::Overview
+            }
+            CommandId::ToggleFileWrap => {
+                self.activity == Activity::Files && self.selected_file.is_some()
+            }
+            CommandId::ToggleContextPane => {
+                matches!(self.activity, Activity::Files | Activity::Search)
+            }
+            _ => true,
+        }
+    }
+
+    fn launcher_commands(&self) -> Vec<CommandSpec> {
+        filtered_commands(&self.launcher_query)
+            .into_iter()
+            .filter(|command| self.command_enabled(command.id))
+            .collect()
+    }
+
     fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         self.filter_query.clear();
@@ -554,16 +823,19 @@ impl DevHubLite {
     }
 
     fn selected_project(&self) -> Option<&Project> {
-        let filtered = self.filtered_indices();
         self.selected
-            .and_then(|i| filtered.get(i))
-            .and_then(|&idx| self.scan.projects.get(idx))
+            .and_then(|project_index| self.scan.projects.get(project_index))
     }
 
     fn clamp_selection_to_filter(&mut self, cx: &mut Context<Self>) {
-        let filtered_count = self.filtered_indices().len();
-        if filtered_count > 0 {
-            self.set_selected(0, cx);
+        let filtered = self.filtered_indices();
+        if self
+            .selected
+            .is_some_and(|selected| filtered.contains(&selected))
+        {
+            cx.notify();
+        } else if let Some(&project_index) = filtered.first() {
+            self.set_selected(project_index, cx);
             self.project_scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
             self.selected = None;
@@ -577,12 +849,12 @@ impl DevHubLite {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.details_tab == DetailsTab::Search {
-            self.handle_search_keydown(event, window, cx);
-            return;
-        }
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
+
+        if self.launcher.is_some() {
+            return;
+        }
 
         if self.show_settings {
             if key == "escape" {
@@ -601,9 +873,15 @@ impl DevHubLite {
             return;
         }
 
-        if self.document_focused && self.details_tab == DetailsTab::Files {
+        if self.document_focused && matches!(self.activity, Activity::Files | Activity::Search) {
             if key == "escape" {
                 self.document_focused = false;
+                if self.activity == Activity::Search {
+                    self.search_input
+                        .update(cx, |input, cx| input.focus(window, cx));
+                } else {
+                    window.focus(&self.focus_handle);
+                }
                 cx.notify();
                 return;
             }
@@ -617,7 +895,7 @@ impl DevHubLite {
         }
     }
 
-    fn copy_document_selection(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy_document(&mut self, cx: &mut Context<Self>) {
         if let LoadState::Loaded(document) = &self.file_state {
             cx.write_to_clipboard(ClipboardItem::new_string(document.clone()));
             self.show_copy_feedback("COPIED FILE", cx);
@@ -652,21 +930,21 @@ impl DevHubLite {
         .detach();
     }
 
-    fn toggle_readme_preview(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.readme_preview = !self.readme_preview;
-        cx.notify();
-    }
-
     fn open_selected_project(
         &mut self,
         _: &OpenSelectedProject,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.details_tab == DetailsTab::Search {
+        if self.activity == Activity::Search && !self.project_catalog_open {
             return;
         }
 
+        self.project_catalog_open = false;
+        self.launch_selected_in_zed(cx);
+    }
+
+    fn launch_selected_in_zed(&mut self, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project().cloned() else {
             return;
         };
@@ -675,12 +953,7 @@ impl DevHubLite {
         cx.notify();
     }
 
-    fn open_selected_with_picker(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn launch_selected_with_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project().cloned() else {
             return;
         };
@@ -705,17 +978,27 @@ impl DevHubLite {
             self.pending_scan_dirs.clear();
             self.pending_remote_hosts.clear();
             self.pending_max_depth = 3;
-            self.source_picker = SourcePicker::Closed;
-        } else {
-            self.show_settings = true;
-            self.pending_scan_dirs = self.config.scan_dirs.clone();
-            self.pending_remote_hosts = self.config.remote_hosts.clone();
-            self.pending_max_depth = self.config.max_depth;
             self.pending_theme = self.config.theme;
             self.pending_appearance = self.config.appearance;
             self.source_picker = SourcePicker::Closed;
-            window.focus(&self.focus_handle);
+        } else {
+            self.open_settings(window, cx);
         }
+        cx.notify();
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings = true;
+        self.project_catalog_open = false;
+        self.launcher = None;
+        self.context_menu = None;
+        self.pending_scan_dirs = self.config.scan_dirs.clone();
+        self.pending_remote_hosts = self.config.remote_hosts.clone();
+        self.pending_max_depth = self.config.max_depth;
+        self.pending_theme = self.config.theme;
+        self.pending_appearance = self.config.appearance;
+        self.source_picker = SourcePicker::Closed;
+        window.focus(&self.focus_handle);
         cx.notify();
     }
 
@@ -986,25 +1269,13 @@ impl DevHubLite {
         }
     }
 
-    fn cycle_theme(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let index = ThemeId::ALL
-            .iter()
-            .position(|theme| *theme == self.pending_theme)
-            .unwrap_or_default();
-        self.pending_theme = ThemeId::ALL[(index + 1) % ThemeId::ALL.len()];
-        cx.notify();
-    }
-
-    fn cycle_appearance(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let index = AppearanceMode::ALL
-            .iter()
-            .position(|appearance| *appearance == self.pending_appearance)
-            .unwrap_or_default();
-        self.pending_appearance = AppearanceMode::ALL[(index + 1) % AppearanceMode::ALL.len()];
-        cx.notify();
-    }
-
     fn save_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let sources_changed = scan_sources_changed(
+            &self.config,
+            &self.pending_scan_dirs,
+            &self.pending_remote_hosts,
+            self.pending_max_depth,
+        );
         let mut config = self.config.clone();
         config.scan_dirs = self.pending_scan_dirs.clone();
         config.remote_hosts = self.pending_remote_hosts.clone();
@@ -1017,7 +1288,9 @@ impl DevHubLite {
                 self.persistence_history.record_events(report.events);
                 self.config = config;
                 self.show_settings = false;
-                self.begin_scan(window, cx);
+                if sources_changed {
+                    self.begin_scan(window, cx);
+                }
             }
             Err(error) => self.record_persistence_failure(error),
         }
@@ -1041,6 +1314,249 @@ impl DevHubLite {
             return self.source_picker_panel(theme, cx);
         }
 
+        let (local_hidden, remote_hidden): (Vec<_>, Vec<_>) = self
+            .scan
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| self.is_hidden(project))
+            .map(|(index, _)| index)
+            .partition(|index| !self.scan.projects[*index].source.is_remote());
+        let has_local_hidden = !local_hidden.is_empty();
+        let has_remote_hidden = !remote_hidden.is_empty();
+
+        let local_sources = self
+            .pending_scan_dirs
+            .iter()
+            .enumerate()
+            .map(|(index, dir)| {
+                div()
+                    .id(("scan-dir-row", index))
+                    .h(px(27.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.35))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_muted)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(dir.to_string_lossy().into_owned()),
+                    )
+                    .child(
+                        Button::new(("remove-dir", index))
+                            .icon(IconName::Delete)
+                            .tooltip("Remove local source")
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .on_click(cx.listener(move |this, event, window, cx| {
+                                this.remove_scan_dir(index, event, window, cx);
+                            })),
+                    )
+            });
+
+        let local_hidden_rows = local_hidden.into_iter().filter_map(|index| {
+            let project = self.scan.projects.get(index)?;
+            Some(
+                div()
+                    .id(("hidden-local-project", index))
+                    .h(px(25.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.35))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_muted)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(project.name.clone()),
+                    )
+                    .child(
+                        Button::new(("unhide-local-project", index))
+                            .icon(IconName::Eye)
+                            .tooltip("Show project")
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.unhide_project(index, cx);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        });
+
+        let remote_hosts =
+            self.pending_remote_hosts
+                .iter()
+                .enumerate()
+                .map(|(host_index, host)| {
+                    let host_label = format!("{}  ({})", host.label(), host.host);
+                    div()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(9.0))
+                                        .text_color(theme.text)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(host_label),
+                                )
+                                .child(
+                                    Button::new(("remove-ssh-host", host_index))
+                                        .icon(IconName::Delete)
+                                        .tooltip("Remove SSH source")
+                                        .xsmall()
+                                        .compact()
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, event, window, cx| {
+                                            this.remove_remote_host(host_index, event, window, cx);
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h(px(22.0))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .font_family(MONO_FONT)
+                                .text_size(px(9.0))
+                                .text_color(theme.text_muted)
+                                .child("depth")
+                                .child(
+                                    Button::new(("remote-depth-down", host_index))
+                                        .icon(IconName::Minus)
+                                        .tooltip("Decrease SSH scan depth")
+                                        .xsmall()
+                                        .compact()
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.change_remote_depth(host_index, -1, cx);
+                                        })),
+                                )
+                                .child(host.max_depth.to_string())
+                                .child(
+                                    Button::new(("remote-depth-up", host_index))
+                                        .icon(IconName::Plus)
+                                        .tooltip("Increase SSH scan depth")
+                                        .xsmall()
+                                        .compact()
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.change_remote_depth(host_index, 1, cx);
+                                        })),
+                                ),
+                        )
+                        .children(host.roots.iter().enumerate().map(|(root_index, root)| {
+                            div()
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(9.0))
+                                        .text_color(theme.text_muted)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(root.clone()),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-ssh-root-{host_index}-{root_index}"
+                                    )))
+                                    .icon(IconName::Delete)
+                                    .tooltip("Remove remote folder")
+                                    .xsmall()
+                                    .compact()
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, event, window, cx| {
+                                        this.remove_remote_root(
+                                            host_index, root_index, event, window, cx,
+                                        );
+                                    })),
+                                )
+                        }))
+                        .child(
+                            Button::new(("browse-ssh", host_index))
+                                .icon(IconName::Plus)
+                                .label("Remote folder")
+                                .xsmall()
+                                .compact()
+                                .ghost()
+                                .on_click(cx.listener(move |this, event, window, cx| {
+                                    this.open_remote_picker(host_index, event, window, cx);
+                                })),
+                        )
+                });
+
+        let remote_hidden_rows = remote_hidden.into_iter().filter_map(|index| {
+            let project = self.scan.projects.get(index)?;
+            Some(
+                div()
+                    .id(("hidden-remote-project", index))
+                    .h(px(25.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.35))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_muted)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .child(format!("{}  {}", project.source.label(), project.name)),
+                    )
+                    .child(
+                        Button::new(("unhide-remote-project", index))
+                            .icon(IconName::Eye)
+                            .tooltip("Show project")
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.unhide_project(index, cx);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        });
+
         div()
             .min_h_0()
             .flex_1()
@@ -1049,412 +1565,148 @@ impl DevHubLite {
             .bg(theme.panel_background)
             .child(
                 div()
-                    .h(px(28.0))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .px_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(section_label("SETTINGS", theme)),
-            )
-            .child(
-                div()
-                    .id("settings-scroll")
+                    .min_h_0()
                     .flex_1()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .py_2()
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(section_label("SCAN DIRECTORIES", theme))
-                    .children(self.pending_scan_dirs.iter().enumerate().map(|(i, dir)| {
-                        div()
-                            .id(("scan-dir-row", i))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(10.0))
-                                    .text_color(theme.text_muted)
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .child(dir.to_string_lossy().into_owned()),
-                            )
-                            .child(
-                                div()
-                                    .id(("remove-dir", i))
-                                    .flex_shrink_0()
-                                    .cursor_pointer()
-                                    .text_color(theme.error)
-                                    .hover(move |style| style.text_color(theme.text))
-                                    .child("\u{00d7}")
-                                    .on_click(cx.listener(move |this, event, window, cx| {
-                                        this.remove_scan_dir(i, event, window, cx);
-                                    })),
-                            )
-                    }))
                     .child(
                         div()
-                            .id("add-scan-dir")
-                            .mt_1()
-                            .cursor_pointer()
-                            .text_size(px(11.0))
-                            .text_color(theme.accent)
-                            .hover(move |style| style.text_color(theme.text))
-                            .child("+ Browse local folder")
-                            .on_click(cx.listener(Self::open_local_picker)),
-                    )
-                    .child(div().h(px(12.0)))
-                    .child(section_label("SSH SOURCES", theme))
-                    .children(self.pending_remote_hosts.iter().enumerate().map(
-                        |(host_index, host)| {
-                            let host_label = format!("{}  ({})", host.label(), host.host);
-                            div()
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.surface_background)
-                                .p_2()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .font_family(MONO_FONT)
-                                                .text_size(px(10.0))
-                                                .text_color(theme.text)
-                                                .child(host_label),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(("remove-ssh-host", host_index))
-                                                .cursor_pointer()
-                                                .text_color(theme.error)
-                                                .child("\u{00d7}")
-                                                .on_click(cx.listener(
-                                                    move |this, event, window, cx| {
-                                                        this.remove_remote_host(
-                                                            host_index, event, window, cx,
-                                                        );
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(10.0))
-                                        .text_color(theme.text_muted)
-                                        .child("scan depth")
-                                        .child(
-                                            div()
-                                                .id(("remote-depth-down", host_index))
-                                                .cursor_pointer()
-                                                .text_color(theme.accent)
-                                                .child("−")
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| {
-                                                        this.change_remote_depth(
-                                                            host_index,
-                                                            -1,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        )
-                                        .child(host.max_depth.to_string())
-                                        .child(
-                                            div()
-                                                .id(("remote-depth-up", host_index))
-                                                .cursor_pointer()
-                                                .text_color(theme.accent)
-                                                .child("+")
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| {
-                                                        this.change_remote_depth(
-                                                            host_index,
-                                                            1,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .children(host.roots.iter().enumerate().map(
-                                    |(root_index, root)| {
+                            .id("local-settings-scroll")
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .px_3()
+                            .py_2()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(section_label("LOCAL", theme))
+                            .children(local_sources)
+                            .child(
+                                Button::new("add-scan-dir")
+                                    .icon(IconName::Plus)
+                                    .label("Local folder")
+                                    .xsmall()
+                                    .compact()
+                                    .ghost()
+                                    .on_click(cx.listener(Self::open_local_picker)),
+                            )
+                            .child(div().h(px(8.0)))
+                            .child(section_label("SCAN DEPTH", theme))
+                            .child(
+                                div()
+                                    .h(px(28.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("decrease-depth")
+                                            .icon(IconName::Minus)
+                                            .tooltip("Decrease local scan depth")
+                                            .xsmall()
+                                            .compact()
+                                            .ghost()
+                                            .on_click(cx.listener(Self::decrease_max_depth)),
+                                    )
+                                    .child(
                                         div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .font_family(MONO_FONT)
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme.text_muted)
-                                                    .child(root.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "remove-ssh-root-{host_index}-{root_index}"
-                                                    )))
-                                                    .cursor_pointer()
-                                                    .text_color(theme.error)
-                                                    .child("\u{00d7}")
-                                                    .on_click(cx.listener(
-                                                        move |this, event, window, cx| {
-                                                            this.remove_remote_root(
-                                                                host_index,
-                                                                root_index,
-                                                                event,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .id(("browse-ssh", host_index))
-                                        .cursor_pointer()
-                                        .text_size(px(10.0))
-                                        .text_color(theme.accent)
-                                        .child("+ Browse remote folder")
-                                        .on_click(cx.listener(
-                                            move |this, event, window, cx| {
-                                                this.open_remote_picker(
-                                                    host_index,
-                                                    event,
-                                                    window,
-                                                    cx,
-                                                );
-                                            },
-                                        )),
-                                )
-                        },
-                    ))
+                                            .w(px(20.0))
+                                            .text_center()
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text)
+                                            .child(self.pending_max_depth.to_string()),
+                                    )
+                                    .child(
+                                        Button::new("increase-depth")
+                                            .icon(IconName::Plus)
+                                            .tooltip("Increase local scan depth")
+                                            .xsmall()
+                                            .compact()
+                                            .ghost()
+                                            .on_click(cx.listener(Self::increase_max_depth)),
+                                    ),
+                            )
+                            .when(has_local_hidden, |pane| {
+                                pane.child(div().h(px(8.0)))
+                                    .child(section_label("HIDDEN PROJECTS", theme))
+                                    .children(local_hidden_rows)
+                            }),
+                    )
                     .child(
                         div()
+                            .id("remote-settings-scroll")
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .px_3()
+                            .py_2()
                             .flex()
-                            .items_center()
-                            .gap_2()
+                            .flex_col()
+                            .gap_1()
+                            .child(section_label("SSH", theme))
+                            .children(remote_hosts)
                             .child(
                                 div()
-                                    .w(px(180.0))
+                                    .pt_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
                                     .child(
                                         Input::new(&self.remote_name_input)
                                             .h(px(24.0))
                                             .bg(theme.surface_background)
                                             .border_color(theme.border),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .w(px(260.0))
+                                    )
                                     .child(
                                         Input::new(&self.remote_host_input)
                                             .h(px(24.0))
                                             .bg(theme.surface_background)
                                             .border_color(theme.border),
+                                    )
+                                    .child(
+                                        Button::new("add-ssh-host")
+                                            .icon(IconName::Plus)
+                                            .label("Add host")
+                                            .xsmall()
+                                            .compact()
+                                            .primary()
+                                            .on_click(cx.listener(Self::add_remote_host)),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .id("add-ssh-host")
-                                    .px_2()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(theme.accent)
-                                    .cursor_pointer()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.accent)
-                                    .child("Add && browse")
-                                    .on_click(cx.listener(Self::add_remote_host)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(9.0))
-                            .text_color(theme.text_disabled)
-                            .child(
-                                "SSH uses your OpenSSH config and keys in BatchMode; remote hosts must provide a POSIX sh environment.",
-                            ),
-                    )
-                    .child(div().h(px(12.0)))
-                    .child(section_label("HIDDEN PROJECTS", theme))
-                    .children(
-                        self.scan
-                            .projects
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, p)| self.is_hidden(p))
-                            .map(|(i, project)| {
-                                div()
-                                    .id(("hidden-project-row", i))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .font_family(MONO_FONT)
-                                            .text_size(px(10.0))
-                                            .text_color(theme.text_muted)
-                                            .whitespace_nowrap()
-                                            .overflow_hidden()
-                                            .child(format!(
-                                                "{} | {}",
-                                                project.source.label(),
-                                                project.name
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(("unhide-project", i))
-                                            .flex_shrink_0()
-                                            .cursor_pointer()
-                                            .text_color(theme.text_muted)
-                                            .hover(move |style| style.text_color(theme.text))
-                                            .child(Icon::new(IconName::EyeOff).size(px(14.0)))
-                                            .on_click(cx.listener(
-                                                move |this: &mut DevHubLite,
-                                                      _: &gpui::ClickEvent,
-                                                      _window,
-                                                      cx| {
-                                                    this.unhide_project(i, cx);
-                                                },
-                                            )),
-                                    )
+                            .when(has_remote_hidden, |pane| {
+                                pane.child(div().h(px(8.0)))
+                                    .child(section_label("HIDDEN PROJECTS", theme))
+                                    .children(remote_hidden_rows)
                             }),
-                    )
-                    .child(div().h(px(12.0)))
-                    .child(section_label("APPEARANCE", theme))
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(38.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .px_3()
+                    .border_t_1()
+                    .border_color(theme.border)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("cycle-theme")
-                                    .px_2()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(theme.border_strong)
-                                    .cursor_pointer()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.text)
-                                    .child(format!("Theme: {}", self.pending_theme.label()))
-                                    .on_click(cx.listener(Self::cycle_theme)),
-                            )
-                            .child(
-                                div()
-                                    .id("cycle-appearance")
-                                    .px_2()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(theme.border_strong)
-                                    .cursor_pointer()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.text)
-                                    .child(format!(
-                                        "Mode: {}",
-                                        self.pending_appearance.label()
-                                    ))
-                                    .on_click(cx.listener(Self::cycle_appearance)),
-                            ),
+                        Button::new("settings-cancel")
+                            .label("Cancel")
+                            .xsmall()
+                            .compact()
+                            .on_click(cx.listener(Self::cancel_settings)),
                     )
                     .child(
-                        div()
-                            .text_size(px(9.0))
-                            .text_color(theme.text_disabled)
-                            .child("Theme changes apply after Save && Rescan."),
-                    )
-                    .child(div().h(px(12.0)))
-                    .child(section_label("LOCAL SCAN DEPTH", theme))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("decrease-depth")
-                                    .cursor_pointer()
-                                    .text_size(px(16.0))
-                                    .text_color(theme.text_muted)
-                                    .hover(move |style| style.text_color(theme.text))
-                                    .child("\u{2212}")
-                                    .on_click(cx.listener(Self::decrease_max_depth)),
-                            )
-                            .child(
-                                div()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(16.0))
-                                    .text_color(theme.text)
-                                    .child(self.pending_max_depth.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .id("increase-depth")
-                                    .cursor_pointer()
-                                    .text_size(px(16.0))
-                                    .text_color(theme.text_muted)
-                                    .hover(move |style| style.text_color(theme.text))
-                                    .child("+")
-                                    .on_click(cx.listener(Self::increase_max_depth)),
-                            ),
-                    )
-                    .child(div().h(px(24.0)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .id("settings-cancel")
-                                    .px_3()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(theme.border_strong)
-                                    .text_color(theme.text)
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(move |style| style.bg(theme.surface_hover))
-                                    .child("Cancel")
-                                    .on_click(cx.listener(Self::cancel_settings)),
-                            )
-                            .child(
-                                div()
-                                    .id("settings-save")
-                                    .px_3()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(theme.accent)
-                                    .bg(theme.accent.opacity(0.15))
-                                    .text_color(theme.accent)
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(move |style| style.bg(theme.accent.opacity(0.25)))
-                                    .child("Save && Rescan")
-                                    .on_click(cx.listener(Self::save_settings)),
-                            ),
+                        Button::new("settings-save")
+                            .label("Save")
+                            .xsmall()
+                            .compact()
+                            .primary()
+                            .on_click(cx.listener(Self::save_settings)),
                     ),
             )
             .into_any_element()
@@ -1728,12 +1980,24 @@ impl DevHubLite {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.launcher.is_some() {
+            let count = self.launcher_item_count();
+            if count > 0 {
+                self.launcher_selected = self.launcher_selected.checked_sub(1).unwrap_or(count - 1);
+                self.launcher_scroll
+                    .scroll_to_item(self.launcher_selected);
+                self.preview_selected_theme(cx);
+                cx.notify();
+            }
+            return;
+        }
         if self.document_focused {
             return;
         }
-        let count = self.filtered_indices().len();
-        if let Some(index) = previous_selection(self.selected, count) {
-            self.set_selected(index, cx);
+        let filtered = self.filtered_indices();
+        let current = visible_project_row(&filtered, self.selected);
+        if let Some(row) = previous_selection(current, filtered.len()) {
+            self.set_selected(filtered[row], cx);
         }
     }
 
@@ -1746,8 +2010,7 @@ impl DevHubLite {
         if self.show_settings {
             return;
         }
-        self.filter_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.set_activity(Activity::Search, window, cx);
     }
 
     fn select_next_project(
@@ -1756,12 +2019,24 @@ impl DevHubLite {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.launcher.is_some() {
+            let count = self.launcher_item_count();
+            if count > 0 {
+                self.launcher_selected = (self.launcher_selected + 1) % count;
+                self.launcher_scroll
+                    .scroll_to_item(self.launcher_selected);
+                self.preview_selected_theme(cx);
+                cx.notify();
+            }
+            return;
+        }
         if self.document_focused {
             return;
         }
-        let count = self.filtered_indices().len();
-        if let Some(index) = next_selection(self.selected, count) {
-            self.set_selected(index, cx);
+        let filtered = self.filtered_indices();
+        let current = visible_project_row(&filtered, self.selected);
+        if let Some(row) = next_selection(current, filtered.len()) {
+            self.set_selected(filtered[row], cx);
         }
     }
 
@@ -1771,11 +2046,20 @@ impl DevHubLite {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.launcher.is_some() {
+            if self.launcher_item_count() > 0 {
+                self.launcher_selected = 0;
+                self.launcher_scroll.scroll_to_item(0);
+                self.preview_selected_theme(cx);
+                cx.notify();
+            }
+            return;
+        }
         if self.document_focused {
             return;
         }
-        if !self.filtered_indices().is_empty() {
-            self.set_selected(0, cx);
+        if let Some(&project_index) = self.filtered_indices().first() {
+            self.set_selected(project_index, cx);
         }
     }
 
@@ -1785,26 +2069,131 @@ impl DevHubLite {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.launcher.is_some() {
+            let count = self.launcher_item_count();
+            if count > 0 {
+                self.launcher_selected = count - 1;
+                self.launcher_scroll.scroll_to_item(count - 1);
+                self.preview_selected_theme(cx);
+                cx.notify();
+            }
+            return;
+        }
         if self.document_focused {
             return;
         }
-        let count = self.filtered_indices().len();
-        if count > 0 {
-            self.set_selected(count - 1, cx);
+        if let Some(&project_index) = self.filtered_indices().last() {
+            self.set_selected(project_index, cx);
         }
     }
 
-    fn select_tab(&mut self, tab: DetailsTab, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus_handle);
-        self.details_tab = tab;
-        match tab {
-            DetailsTab::Files if matches!(self.tree_state, LoadState::Idle) => self.load_tree(cx),
-            DetailsTab::Overview if matches!(self.readme_state, LoadState::Idle) => {
+    fn set_activity(&mut self, activity: Activity, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings = false;
+        self.project_catalog_open = false;
+        self.activity = activity;
+        match activity {
+            Activity::Files if matches!(self.tree_state, LoadState::Idle) => self.load_tree(cx),
+            Activity::Overview if matches!(self.readme_state, LoadState::Idle) => {
                 self.load_readme(cx)
             }
-            _ => {}
+            Activity::Search => {
+                self.context_pane_visible = true;
+                self.search_input
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
+            _ => window.focus(&self.focus_handle),
         }
         cx.notify();
+    }
+
+    fn show_command_palette(
+        &mut self,
+        _: &ShowCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_launcher(LauncherMode::Commands, window, cx);
+    }
+
+    fn show_project_switcher(
+        &mut self,
+        _: &ShowProjectSwitcher,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_launcher(LauncherMode::Projects, window, cx);
+    }
+
+    fn toggle_project_catalog(
+        &mut self,
+        _: &ToggleProjectCatalog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_project_catalog_open(window, cx);
+    }
+
+    fn toggle_project_catalog_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings = false;
+        self.context_menu = None;
+        self.launcher = None;
+        self.launcher_query.clear();
+        self.launcher_selected = 0;
+        self.project_catalog_open = !self.project_catalog_open;
+        self.resize_target = None;
+        if self.project_catalog_open {
+            self.filter_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            window.focus(&self.focus_handle);
+        }
+        cx.notify();
+    }
+
+    fn show_overview(&mut self, _: &ShowOverview, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_activity(Activity::Overview, window, cx);
+    }
+
+    fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_activity(Activity::Files, window, cx);
+    }
+
+    fn show_search(&mut self, _: &ShowSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_activity(Activity::Search, window, cx);
+    }
+
+    fn toggle_context_pane(
+        &mut self,
+        _: &ToggleContextPane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.activity, Activity::Files | Activity::Search) {
+            return;
+        }
+        self.context_pane_visible = !self.context_pane_visible;
+        self.resize_target = None;
+        cx.notify();
+    }
+
+    fn dismiss_launcher(
+        &mut self,
+        _: &DismissLauncher,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_catalog_open {
+            self.project_catalog_open = false;
+            self.resize_target = None;
+            window.focus(&self.focus_handle);
+            cx.notify();
+        } else {
+            self.close_launcher(window, cx);
+        }
+    }
+
+    fn accept_launcher(&mut self, _: &AcceptLauncher, window: &mut Window, cx: &mut Context<Self>) {
+        self.accept_launcher_selection(window, cx);
     }
 
     fn load_tree(&mut self, cx: &mut Context<Self>) {
@@ -1845,12 +2234,6 @@ impl DevHubLite {
             });
         })
         .detach();
-    }
-
-    fn toggle_hidden(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_hidden = !self.show_hidden;
-        self.expanded_dirs.clear();
-        self.load_tree(cx);
     }
 
     fn load_readme(&mut self, cx: &mut Context<Self>) {
@@ -2009,56 +2392,6 @@ impl DevHubLite {
         .detach();
     }
 
-    fn perform_search(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.execute_search(window, cx);
-    }
-
-    fn handle_search_keydown(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.keystroke.key == "enter" {
-            self.execute_search(window, cx);
-            return;
-        }
-
-        let key = event.keystroke.key.as_str();
-        let mods = &event.keystroke.modifiers;
-
-        if key == "backspace" {
-            self.search_query.pop();
-            self.search_generation = self.search_generation.wrapping_add(1);
-            self.search_state = LoadState::Idle;
-            cx.notify();
-            return;
-        }
-
-        if key == "escape" {
-            self.search_query.clear();
-            self.search_generation = self.search_generation.wrapping_add(1);
-            self.search_state = LoadState::Idle;
-            cx.notify();
-            return;
-        }
-
-        if mods.control || mods.alt || mods.function {
-            return;
-        }
-
-        let candidate = event.keystroke.key_char.as_deref().unwrap_or(key);
-        if candidate.chars().count() == 1 {
-            let ch = candidate.chars().next().unwrap();
-            if accepts_manual_search_character(ch) {
-                self.search_query.push(ch.to_ascii_lowercase());
-                self.search_generation = self.search_generation.wrapping_add(1);
-                self.search_state = LoadState::Idle;
-                cx.notify();
-            }
-        }
-    }
-
     fn is_entry_visible(entry: &FileEntry, expanded: &HashSet<PathBuf>) -> bool {
         if entry.depth == 0 {
             return true;
@@ -2097,172 +2430,13 @@ impl DevHubLite {
                 .into_any_element();
         };
 
-        let active_tab = self.details_tab;
-
-        let tab_bar = div()
-            .h(px(32.0))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .px_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .gap_0()
-            .child({
-                let is_active = active_tab == DetailsTab::Overview;
-                div()
-                    .id("tab-overview")
-                    .h(px(32.0))
-                    .px_2()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(if is_active {
-                        theme.focus
-                    } else {
-                        theme.panel_background
-                    })
-                    .text_size(px(10.0))
-                    .font_family(MONO_FONT)
-                    .text_color(if is_active {
-                        theme.text
-                    } else {
-                        theme.text_disabled
-                    })
-                    .hover(move |style| style.text_color(theme.text))
-                    .child("OVERVIEW")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_tab(DetailsTab::Overview, window, cx);
-                    }))
-            })
-            .child({
-                let is_active = active_tab == DetailsTab::Files;
-                div()
-                    .id("tab-files")
-                    .h(px(32.0))
-                    .px_2()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(if is_active {
-                        theme.focus
-                    } else {
-                        theme.panel_background
-                    })
-                    .text_size(px(10.0))
-                    .font_family(MONO_FONT)
-                    .text_color(if is_active {
-                        theme.text
-                    } else {
-                        theme.text_disabled
-                    })
-                    .hover(move |style| style.text_color(theme.text))
-                    .child("FILES")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_tab(DetailsTab::Files, window, cx);
-                    }))
-            })
-            .child({
-                let is_active = active_tab == DetailsTab::Search;
-                div()
-                    .id("tab-search")
-                    .h(px(32.0))
-                    .px_2()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .border_b_1()
-                    .border_color(if is_active {
-                        theme.focus
-                    } else {
-                        theme.panel_background
-                    })
-                    .text_size(px(10.0))
-                    .font_family(MONO_FONT)
-                    .text_color(if is_active {
-                        theme.text
-                    } else {
-                        theme.text_disabled
-                    })
-                    .hover(move |style| style.text_color(theme.text))
-                    .child("SEARCH")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_tab(DetailsTab::Search, window, cx);
-                    }))
-            })
-            .child(div().flex_1())
-            .child({
-                div()
-                    .id("open-project-in-zed")
-                    .h(px(23.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .bg(theme.surface_background)
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.0))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(move |style| {
-                        style
-                            .bg(theme.surface_hover)
-                            .border_color(theme.text_disabled)
-                            .text_color(theme.text)
-                    })
-                    .active(move |style| style.bg(theme.surface_selected))
-                    .child("OPEN IN ZED")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_selected_project(&OpenSelectedProject, window, cx);
-                    }))
-            })
-            .child({
-                div()
-                    .id("open-project-with-picker")
-                    .h(px(23.0))
-                    .ml_1()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .border_1()
-                    .border_color(theme.border_strong)
-                    .bg(theme.surface_background)
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.0))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(move |style| {
-                        style
-                            .bg(theme.surface_hover)
-                            .border_color(theme.text_disabled)
-                            .text_color(theme.text)
-                    })
-                    .active(move |style| style.bg(theme.surface_selected))
-                    .child("OPEN IN…")
-                    .on_click(cx.listener(Self::open_selected_with_picker))
-            });
-
-        let content: gpui::AnyElement = match self.details_tab {
-            DetailsTab::Overview => self
+        match self.activity {
+            Activity::Overview => self
                 .overview_content(project, theme, window, cx)
                 .into_any_element(),
-            DetailsTab::Files => self.files_content(theme, window, cx),
-            DetailsTab::Search => self.search_content(theme, cx),
-        };
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(tab_bar)
-            .child(content)
-            .into_any_element()
+            Activity::Files => self.files_content(theme, window, cx),
+            Activity::Search => self.search_content(theme, window, cx),
+        }
     }
 
     fn overview_content(
@@ -2307,22 +2481,17 @@ impl DevHubLite {
                 workbench_message("no README found", theme.text_disabled)
             }
         };
-        let host = project.source.host().unwrap_or("local").to_string();
-        let remote = project.git_remote.clone().unwrap_or_else(|| "none".into());
-        let markers = if project.markers_found.is_empty() {
-            "none".to_string()
-        } else {
-            project.markers_found.join(", ")
-        };
         let modified = project
             .last_modified
             .map(relative_modified)
             .unwrap_or_else(|| "unknown".into());
+        let source_label = project.source.label().to_string();
+        let app = cx.entity();
 
         div()
             .id("overview-panel")
+            .size_full()
             .min_h_0()
-            .flex_1()
             .flex()
             .flex_col()
             .child(
@@ -2330,7 +2499,7 @@ impl DevHubLite {
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_1()
                     .px_3()
                     .py_2()
                     .border_b_1()
@@ -2350,68 +2519,74 @@ impl DevHubLite {
                                     .child(project.name.clone()),
                             )
                             .child(
-                                div()
-                                    .id("readme-mode-toggle")
-                                    .px_2()
-                                    .py(px(2.0))
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(9.0))
-                                    .text_color(theme.accent)
-                                    .cursor_pointer()
-                                    .hover(move |style| style.bg(theme.surface_hover))
-                                    .child(if self.readme_preview {
-                                        "RAW"
+                                Button::new("readme-mode-toggle")
+                                    .label(if self.readme_preview {
+                                        "Raw"
                                     } else {
-                                        "PREVIEW"
+                                        "Preview"
                                     })
-                                    .on_click(cx.listener(Self::toggle_readme_preview)),
+                                    .tooltip("Toggle README rendering")
+                                    .small()
+                                    .compact()
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.readme_preview = !this.readme_preview;
+                                            cx.notify();
+                                        });
+                                    }),
                             ),
                     )
                     .child(
                         div()
-                            .h(px(42.0))
+                            .h(px(20.0))
                             .flex_shrink_0()
                             .flex()
-                            .gap_2()
-                            .child(info_card(
-                                "TYPE",
-                                project.project_type.label().to_string(),
-                                theme,
-                            ))
-                            .child(info_card(
-                                "SOURCE",
-                                project.source.label().to_string(),
-                                theme,
-                            ))
-                            .child(info_card(
-                                "GIT",
-                                if project.has_git {
-                                    "repository"
-                                } else {
-                                    "none"
-                                }
-                                .to_string(),
-                                theme,
-                            ))
-                            .child(info_card(
-                                "PATH",
-                                project.path.to_string_lossy().into_owned(),
-                                theme,
-                            )),
+                            .items_center()
+                            .gap_1()
+                            .font_family(MONO_FONT)
+                            .text_size(px(10.0))
+                            .text_color(theme.text_muted)
+                            .child(
+                                Icon::new(IconName::Folder)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_disabled),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .child(project.path.to_string_lossy().into_owned()),
+                            ),
                     )
                     .child(
                         div()
-                            .h(px(42.0))
+                            .h(px(18.0))
                             .flex_shrink_0()
                             .flex()
+                            .items_center()
                             .gap_2()
-                            .child(info_card("HOST", host, theme))
-                            .child(info_card("REMOTE", remote, theme))
-                            .child(info_card("MARKERS", markers, theme))
-                            .child(info_card("MODIFIED", modified, theme)),
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_disabled)
+                            .child(project.project_type.label())
+                            .child("·")
+                            .child(source_label)
+                            .when(project.has_git, |metadata| metadata.child("·").child("Git"))
+                            .child("·")
+                            .child(modified),
                     ),
             )
-            .child(div().min_h_0().flex_1().child(readme))
+            .child(
+                div()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(readme),
+            )
     }
 
     fn files_content(
@@ -2441,7 +2616,8 @@ impl DevHubLite {
             .collect();
 
         let show_hidden = self.show_hidden;
-        let dragging = self.dragging_split;
+        let dragging = self.resize_target == Some(ResizeTarget::WorkspaceContext);
+        let app = cx.entity();
         let tree_notice = match (listing.truncated, listing.warnings.len()) {
             (true, 0) => "500+ entries".to_string(),
             (false, 0) => String::new(),
@@ -2452,7 +2628,9 @@ impl DevHubLite {
         let tree_panel =
             div()
                 .id("tree-panel")
-                .w(px(self.tree_width_px))
+                .w(px(self.context_width_px))
+                .h_full()
+                .min_h_0()
                 .flex_shrink_0()
                 .flex()
                 .flex_col()
@@ -2466,23 +2644,18 @@ impl DevHubLite {
                         .border_b_1()
                         .border_color(theme.border)
                         .gap_1()
-                        .cursor_pointer()
                         .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(if show_hidden {
-                                    theme.text
-                                } else {
-                                    theme.text_disabled
-                                })
-                                .child(if show_hidden { "\u{2611}" } else { "\u{2610}" }),
-                        )
-                        .child(
-                            div()
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.0))
-                                .text_color(theme.text_disabled)
-                                .child("show hidden"),
+                            Checkbox::new("hidden-toggle")
+                                .label("Show hidden")
+                                .checked(show_hidden)
+                                .small()
+                                .on_click(move |checked, _, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.show_hidden = *checked;
+                                        this.expanded_dirs.clear();
+                                        this.load_tree(cx);
+                                    });
+                                }),
                         )
                         .child(
                             div()
@@ -2491,14 +2664,12 @@ impl DevHubLite {
                                 .text_size(px(9.0))
                                 .text_color(theme.warning)
                                 .child(tree_notice),
-                        )
-                        .id("hidden-toggle")
-                        .cursor_pointer()
-                        .on_click(cx.listener(Self::toggle_hidden)),
+                        ),
                 )
                 .child(
                     div()
                         .id("files-scroll")
+                        .min_h_0()
                         .flex_1()
                         .overflow_y_scroll()
                         .children(visible.iter().map(|&idx| {
@@ -2574,12 +2745,57 @@ impl DevHubLite {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    this.dragging_split = true;
+                    this.resize_target = Some(ResizeTarget::WorkspaceContext);
                     cx.notify();
                 }),
             );
 
-        let code_panel_content: gpui::AnyElement = match (&self.selected_file, &self.file_state) {
+        let code_panel_content = self.file_detail_content(theme, window, cx);
+
+        let code_panel = div()
+            .id("code-panel")
+            .h_full()
+            .min_h_0()
+            .flex_1()
+            .min_w_0()
+            .child(code_panel_content);
+
+        div()
+            .id("split-pane")
+            .size_full()
+            .flex()
+            .flex_row()
+            .min_h_0()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.resize_target == Some(ResizeTarget::WorkspaceContext) {
+                        this.resize_target = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.resize_target == Some(ResizeTarget::WorkspaceContext) {
+                    let raw: f32 = event.position.x.into();
+                    this.context_width_px = raw.clamp(160.0, 460.0);
+                    cx.notify();
+                }
+            }))
+            .when(self.context_pane_visible, |pane| {
+                pane.child(tree_panel).child(handle)
+            })
+            .child(code_panel)
+            .into_any_element()
+    }
+
+    fn file_detail_content(
+        &self,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match (&self.selected_file, &self.file_state) {
             (Some(path), LoadState::Loaded(document)) => {
                 self.document_panel(path, document, theme, window, cx)
             }
@@ -2591,41 +2807,7 @@ impl DevHubLite {
             (Some(_), LoadState::Idle) | (None, _) => {
                 workbench_message("select a file", theme.text_disabled)
             }
-        };
-
-        let code_panel = div()
-            .id("code-panel")
-            .flex_1()
-            .min_w_0()
-            .child(code_panel_content);
-
-        div()
-            .id("split-pane")
-            .flex_1()
-            .flex()
-            .flex_row()
-            .min_h_0()
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.dragging_split {
-                        this.dragging_split = false;
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if this.dragging_split {
-                    let raw: f32 = event.position.x.into();
-                    let offset = raw - 264.0;
-                    this.tree_width_px = offset.clamp(80.0, 600.0);
-                    cx.notify();
-                }
-            }))
-            .child(tree_panel)
-            .child(handle)
-            .child(code_panel)
-            .into_any_element()
+        }
     }
 
     fn document_panel(
@@ -2673,8 +2855,13 @@ impl DevHubLite {
             .disabled(true)
             .appearance(false)
             .focus_bordered(false)
+            .p_0()
+            .bg(theme.panel_background)
+            .text_size(px(12.0))
             .h_full();
         let editor_for_wrap = editor.clone();
+        let app_for_copy = app.clone();
+        let app_for_wrap = app.clone();
 
         div()
             .size_full()
@@ -2682,12 +2869,13 @@ impl DevHubLite {
             .flex_col()
             .child(
                 div()
-                    .h(px(26.0))
+                    .h(px(24.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_2()
+                    .pl_2()
+                    .pr_1()
                     .border_b_1()
                     .border_color(theme.border)
                     .font_family(MONO_FONT)
@@ -2703,30 +2891,27 @@ impl DevHubLite {
                     )
                     .child(format!("{language} · {line_count} lines"))
                     .child(
-                        div()
-                            .id("document-copy")
-                            .px_2()
-                            .cursor_pointer()
-                            .text_color(theme.accent)
-                            .hover(move |style| style.bg(theme.surface_hover))
-                            .child("COPY ALL")
-                            .on_click(cx.listener(Self::copy_document_selection)),
+                        Button::new("document-copy")
+                            .icon(IconName::Copy)
+                            .tooltip("Copy file contents")
+                            .small()
+                            .compact()
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                app_for_copy.update(cx, |this, cx| this.copy_document(cx));
+                            }),
                     )
                     .child(
-                        div()
-                            .id("document-wrap")
-                            .px_2()
-                            .cursor_pointer()
-                            .text_color(if wrap {
-                                theme.accent
-                            } else {
-                                theme.text_disabled
-                            })
-                            .hover(move |style| style.bg(theme.surface_hover))
-                            .child(if wrap { "WRAP ON" } else { "WRAP OFF" })
+                        Button::new("document-wrap")
+                            .label("Wrap")
+                            .tooltip("Toggle line wrapping")
+                            .small()
+                            .compact()
+                            .ghost()
+                            .selected(wrap)
                             .on_click(move |_, window, cx| {
-                                let next = !app.read(cx).wrap_document;
-                                app.update(cx, |this, cx| {
+                                let next = !app_for_wrap.read(cx).wrap_document;
+                                app_for_wrap.update(cx, |this, cx| {
                                     this.wrap_document = next;
                                     cx.notify();
                                 });
@@ -2736,18 +2921,108 @@ impl DevHubLite {
                             }),
                     ),
             )
-            .child(div().id("code-scroll").flex_1().min_h_0().child(code))
+            .child(
+                div()
+                    .id("code-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .bg(theme.panel_background)
+                    .child(code),
+            )
             .into_any_element()
     }
 
-    fn search_content(&self, theme: Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        div()
-            .size_full()
+    fn search_content(
+        &self,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let app = cx.entity();
+        let dragging = self.resize_target == Some(ResizeTarget::WorkspaceContext);
+        let results = match &self.search_state {
+            LoadState::Idle => {
+                workbench_message("enter a query and press Enter", theme.text_disabled)
+            }
+            LoadState::Loading => workbench_message("searching...", theme.text_disabled),
+            LoadState::Empty => workbench_message("no results", theme.text_muted),
+            LoadState::Error(error) => workbench_message(error.clone(), theme.error),
+            LoadState::Loaded(hits) => div()
+                .id("search-scroll")
+                .flex_1()
+                .overflow_y_scroll()
+                .children(hits.iter().enumerate().map(|(i, hit)| {
+                    let path_str = hit.path.to_string_lossy().into_owned();
+                    let preview = hit.preview.clone();
+                    let line = hit.line;
+                    let hit_path = hit.path.clone();
+                    div()
+                        .id(("sh", i))
+                        .min_h(px(34.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .px_2()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(theme.surface_hover))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(10.0))
+                                        .text_color(theme.text_muted)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(preview),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(9.0))
+                                        .text_color(theme.text_disabled)
+                                        .child(format!("L{line}")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(9.0))
+                                .text_color(theme.text_disabled)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(path_str),
+                        )
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            this.selected_file = Some(hit_path.clone());
+                            this.pending_document_line = Some(line.saturating_sub(1));
+                            this.load_file_content(cx);
+                            window.focus(&this.focus_handle);
+                            cx.notify();
+                        }))
+                }))
+                .into_any_element(),
+        };
+
+        let context = div()
+            .w(px(self.context_width_px))
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
             .flex()
             .flex_col()
+            .border_r_1()
+            .border_color(theme.border)
             .child(
                 div()
-                    .h(px(28.0))
+                    .h(px(30.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -2756,127 +3031,582 @@ impl DevHubLite {
                     .border_color(theme.border)
                     .gap_2()
                     .child(
-                        div()
+                        Input::new(&self.search_input)
                             .flex_1()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.0))
-                            .text_color(if self.search_query.is_empty() {
-                                theme.text_disabled
-                            } else {
-                                theme.text
-                            })
-                            .child({
-                                if self.search_query.is_empty() {
-                                    "search file contents...".to_string()
-                                } else {
-                                    self.search_query.clone()
-                                }
-                            }),
+                            .min_w_0()
+                            .appearance(false),
                     )
                     .child(
-                        div()
-                            .id("search-go")
-                            .cursor_pointer()
-                            .w(px(24.0))
-                            .h(px(22.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_1()
-                            .border_color(if self.search_query.is_empty() {
-                                theme.border
-                            } else {
-                                theme.accent
-                            })
-                            .bg(if self.search_query.is_empty() {
-                                theme.panel_background
-                            } else {
-                                theme.accent.opacity(0.12)
-                            })
-                            .text_size(px(12.0))
-                            .text_color(if self.search_query.is_empty() {
-                                theme.text_disabled
-                            } else {
-                                theme.accent
-                            })
-                            .hover(move |style| {
-                                style
-                                    .bg(theme.accent.opacity(0.2))
-                                    .border_color(theme.accent)
-                                    .text_color(theme.accent)
-                            })
-                            .child("\u{2192}")
-                            .on_click(cx.listener(Self::perform_search)),
+                        Button::new("search-go")
+                            .icon(IconName::Search)
+                            .tooltip("Run search")
+                            .small()
+                            .compact()
+                            .ghost()
+                            .disabled(self.search_query.trim().is_empty())
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| this.execute_search(window, cx));
+                            }),
                     ),
             )
-            .child(match &self.search_state {
-                LoadState::Idle => {
-                    workbench_message("enter a query and press Enter", theme.text_disabled)
+            .child(results);
+
+        let handle = div()
+            .id("search-split-handle")
+            .w(px(4.0))
+            .flex_shrink_0()
+            .bg(if dragging { theme.focus } else { theme.border })
+            .hover(move |style| style.bg(theme.focus))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.resize_target = Some(ResizeTarget::WorkspaceContext);
+                    cx.notify();
+                }),
+            );
+
+        div()
+            .id("search-split-pane")
+            .size_full()
+            .flex()
+            .min_h_0()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.resize_target == Some(ResizeTarget::WorkspaceContext) {
+                        this.resize_target = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.resize_target == Some(ResizeTarget::WorkspaceContext) {
+                    let raw: f32 = event.position.x.into();
+                    this.context_width_px = raw.clamp(160.0, 460.0);
+                    cx.notify();
                 }
-                LoadState::Loading => workbench_message("searching...", theme.text_disabled),
-                LoadState::Empty => workbench_message("no results", theme.text_muted),
-                LoadState::Error(error) => workbench_message(error.clone(), theme.error),
-                LoadState::Loaded(hits) => div()
-                    .id("search-scroll")
+            }))
+            .when(self.context_pane_visible, |search| {
+                search.child(context).child(handle)
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .min_h_0()
+                    .h_full()
                     .flex_1()
-                    .overflow_y_scroll()
-                    .children(hits.iter().enumerate().map(|(i, hit)| {
-                        let path_str = hit.path.to_string_lossy().into_owned();
-                        let preview = hit.preview.clone();
-                        let line = hit.line;
-                        let hit_path = hit.path.clone();
+                    .flex()
+                    .flex_col()
+                    .child(self.file_detail_content(theme, window, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn project_catalog_panel(
+        &self,
+        theme: Theme,
+        filter_active: bool,
+        visible_count: usize,
+        total_count: usize,
+        project_list: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let app = cx.entity();
+        let app_for_close = app.clone();
+        let dragging = self.resize_target == Some(ResizeTarget::ProjectCatalog);
+
+        div()
+            .absolute()
+            .top(px(TITLEBAR_HEIGHT))
+            .bottom(px(STATUSBAR_HEIGHT))
+            .left_0()
+            .right_0()
+            .flex()
+            .occlude()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.resize_target == Some(ResizeTarget::ProjectCatalog) {
+                        this.resize_target = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.resize_target == Some(ResizeTarget::ProjectCatalog) {
+                    let raw: f32 = event.position.x.into();
+                    this.project_catalog_width_px = raw.clamp(180.0, 520.0);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                app.update(cx, |this, cx| {
+                    this.project_catalog_open = false;
+                    this.resize_target = None;
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                });
+            })
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .h_full()
+                    .w(px(self.project_catalog_width_px))
+                    .flex()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.sidebar_background)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
                         div()
-                            .id(("sh", i))
-                            .h(px(24.0))
+                            .h(px(32.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .px_1()
+                            .gap_1()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .key_context("ProjectFilter")
+                            .child(
+                                Input::new(&self.filter_input)
+                                    .min_w_0()
+                                    .flex_1()
+                                    .appearance(false),
+                            )
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(9.0))
+                                    .text_color(theme.text_disabled)
+                                    .child(if filter_active {
+                                        format!("{visible_count}/{total_count}")
+                                    } else {
+                                        total_count.to_string()
+                                    }),
+                            )
+                            .child(
+                                Button::new("close-project-catalog")
+                                    .icon(IconName::Close)
+                                    .tooltip("Close project catalog")
+                                    .xsmall()
+                                    .compact()
+                                    .ghost()
+                                    .on_click(move |_, window, cx| {
+                                        app_for_close.update(cx, |this, cx| {
+                                            this.project_catalog_open = false;
+                                            this.resize_target = None;
+                                            window.focus(&this.focus_handle);
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(project_list),
+            )
+            .child(
+                div()
+                    .id("project-catalog-resize-handle")
+                    .h_full()
+                    .w(px(4.0))
+                    .flex_shrink_0()
+                    .bg(if dragging { theme.focus } else { theme.border })
+                    .hover(move |style| style.bg(theme.focus))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                            this.resize_target = Some(ResizeTarget::ProjectCatalog);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .when(dragging, |catalog| {
+                catalog.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                            let raw: f32 = event.position.x.into();
+                            this.project_catalog_width_px = raw.clamp(180.0, 520.0);
+                            cx.notify();
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                                this.resize_target = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn workspace_navigation(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let app = cx.entity();
+        let button_style = |active: bool| {
+            ButtonCustomVariant::new(cx)
+                .color(if active {
+                    theme.surface_selected
+                } else {
+                    theme.titlebar_background
+                })
+                .foreground(if active {
+                    theme.accent
+                } else {
+                    theme.text_disabled
+                })
+                .hover(theme.surface_hover)
+                .active(theme.surface_selected)
+        };
+
+        let app_for_catalog = app.clone();
+        let mut navigation = div().h_full().flex().items_center().gap_1().child(
+            Button::new("project-catalog")
+                .icon(IconName::LayoutDashboard)
+                .tooltip("Projects (Ctrl+1)")
+                .xsmall()
+                .compact()
+                .custom(button_style(self.project_catalog_open))
+                .w(px(22.0))
+                .h(px(20.0))
+                .on_click(move |_, window, cx| {
+                    app_for_catalog.update(cx, |this, cx| {
+                        this.toggle_project_catalog_open(window, cx);
+                    });
+                }),
+        );
+
+        for (index, activity) in Activity::ALL.into_iter().enumerate() {
+            let icon = match activity {
+                Activity::Overview => IconName::BookOpen,
+                Activity::Files => IconName::FolderOpen,
+                Activity::Search => IconName::Search,
+            };
+            let app = app.clone();
+            navigation = navigation.child(
+                Button::new(("workspace", index))
+                    .icon(icon)
+                    .tooltip(activity.label())
+                    .xsmall()
+                    .compact()
+                    .custom(button_style(
+                        self.activity == activity && !self.show_settings,
+                    ))
+                    .w(px(22.0))
+                    .h(px(20.0))
+                    .on_click(move |_, window, cx| {
+                        app.update(cx, |this, cx| {
+                            this.set_activity(activity, window, cx);
+                        });
+                    }),
+            );
+        }
+
+        let app = cx.entity();
+        navigation = navigation.child(
+            Button::new("bottom-command-palette")
+                .icon(IconName::SquareTerminal)
+                .tooltip("Command palette (Ctrl+Shift+P)")
+                .xsmall()
+                .compact()
+                .custom(button_style(matches!(
+                    self.launcher,
+                    Some(LauncherMode::Commands | LauncherMode::Themes)
+                )))
+                .w(px(22.0))
+                .h(px(20.0))
+                .on_click(move |_, window, cx| {
+                    app.update(cx, |this, cx| {
+                        this.open_launcher(LauncherMode::Commands, window, cx);
+                    });
+                }),
+        );
+
+        navigation.into_any_element()
+    }
+
+    fn launcher_panel(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(mode) = self.launcher else {
+            return div().into_any_element();
+        };
+        let app = cx.entity();
+        let title = match mode {
+            LauncherMode::Commands => "Commands",
+            LauncherMode::Projects => "Projects",
+            LauncherMode::Themes => "Themes",
+        };
+        let app_for_close = app.clone();
+        let app_for_backdrop = app.clone();
+
+        let rows = match mode {
+            LauncherMode::Commands => self
+                .launcher_commands()
+                .into_iter()
+                .enumerate()
+                .map(|(index, command)| {
+                    let app = app.clone();
+                    div()
+                        .id(("command", index))
+                        .h(px(26.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.35))
+                        .cursor_pointer()
+                        .bg(if self.launcher_selected == index {
+                            theme.surface_selected
+                        } else {
+                            theme.surface_background
+                        })
+                        .hover(move |style| style.bg(theme.surface_hover))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_size(px(12.0))
+                                .text_color(theme.text)
+                                .child(command.title),
+                        )
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(9.0))
+                                .text_color(theme.text_disabled)
+                                .child(command.category),
+                        )
+                        .when_some(command.shortcut, |row, shortcut| {
+                            row.child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(9.0))
+                                    .text_color(theme.text_muted)
+                                    .child(shortcut),
+                            )
+                        })
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.launcher_selected = index;
+                                this.accept_launcher_selection(window, cx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+            LauncherMode::Projects => self
+                .launcher_project_indices()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, project_index)| {
+                    let project = self.scan.projects.get(project_index)?;
+                    let app = app.clone();
+                    Some(
+                        div()
+                            .id(("project-switch", index))
+                            .h(px(26.0))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
                             .gap_2()
                             .px_2()
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.35))
                             .cursor_pointer()
+                            .bg(if self.launcher_selected == index {
+                                theme.surface_selected
+                            } else {
+                                theme.surface_background
+                            })
                             .hover(move |style| style.bg(theme.surface_hover))
                             .child(
+                                Icon::new(IconName::Folder)
+                                    .size(px(13.0))
+                                    .text_color(theme.accent),
+                            )
+                            .child(
                                 div()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(9.0))
-                                    .text_color(theme.text_disabled)
-                                    .child(format!("L{}", line)),
+                                    .min_w_0()
+                                    .max_w(px(132.0))
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text)
+                                    .child(project.name.clone()),
                             )
                             .child(
                                 div()
                                     .min_w_0()
                                     .flex_1()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(10.0))
-                                    .text_color(theme.text_muted)
                                     .whitespace_nowrap()
                                     .overflow_hidden()
-                                    .child(preview),
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(8.0))
+                                    .text_color(theme.text_disabled)
+                                    .child(project.path.to_string_lossy().into_owned()),
+                            )
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.launcher_selected = index;
+                                    this.accept_launcher_selection(window, cx);
+                                });
+                            })
+                            .into_any_element(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            LauncherMode::Themes => filtered_themes(&self.launcher_query)
+                .into_iter()
+                .enumerate()
+                .map(|(index, selection)| {
+                    let app = app.clone();
+                    div()
+                        .id(("theme", index))
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.35))
+                        .cursor_pointer()
+                        .bg(if self.launcher_selected == index {
+                            theme.surface_selected
+                        } else {
+                            theme.surface_background
+                        })
+                        .hover(move |style| style.bg(theme.surface_hover))
+                        .child(
+                            Icon::new(
+                                if selection.is_active(self.config.theme, self.config.appearance) {
+                                    IconName::Check
+                                } else {
+                                    IconName::Palette
+                                },
+                            )
+                            .size(px(12.0))
+                            .text_color(
+                                if self.launcher_selected == index {
+                                    theme.accent
+                                } else {
+                                    theme.text_disabled
+                                },
+                            ),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_size(px(12.0))
+                                .text_color(theme.text)
+                                .child(selection.label()),
+                        )
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.launcher_selected = index;
+                                (this.pending_theme, this.pending_appearance) =
+                                    selection.preferences(this.config.theme);
+                                this.accept_launcher_selection(window, cx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        app_for_backdrop.update(cx, |this, cx| {
+                            this.close_launcher(window, cx);
+                        });
+                    })
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .key_context("DevHubLauncher")
+                    .top(px(TITLEBAR_HEIGHT + 4.0))
+                    .left(px(36.0))
+                    .w(px(390.0))
+                    .max_h(px(310.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .rounded_sm()
+                    .bg(theme.surface_background)
+                    .occlude()
+                    .child(
+                        div()
+                            .h(px(30.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(
+                                Input::new(&self.launcher_input)
+                                    .min_w_0()
+                                    .flex_1()
+                                    .appearance(false),
                             )
                             .child(
                                 div()
                                     .font_family(MONO_FONT)
                                     .text_size(px(9.0))
                                     .text_color(theme.text_disabled)
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .max_w(px(120.0))
-                                    .child(path_str),
+                                    .child(title),
                             )
-                            .on_click(cx.listener(move |this, _event, window, cx| {
-                                this.selected_file = Some(hit_path.clone());
-                                this.pending_document_line = Some(line.saturating_sub(1));
-                                this.details_tab = DetailsTab::Files;
-                                this.load_file_content(cx);
-                                window.focus(&this.focus_handle);
-                                cx.notify();
-                            }))
-                    }))
-                    .into_any_element(),
-            })
+                            .child(
+                                Button::new("close-launcher")
+                                    .icon(IconName::Close)
+                                    .tooltip("Close")
+                                    .xsmall()
+                                    .compact()
+                                    .ghost()
+                                    .on_click(move |_, window, cx| {
+                                        app_for_close.update(cx, |this, cx| {
+                                            this.close_launcher(window, cx);
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("launcher-list")
+                            .min_h_0()
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.launcher_scroll)
+                            .when(rows.is_empty(), |list| {
+                                list.child(workbench_message("no matches", theme.text_muted))
+                            })
+                            .children(rows),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -2889,9 +3619,18 @@ impl Focusable for DevHubLite {
 
 impl Render for DevHubLite {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let previewing_appearance = self.launcher == Some(LauncherMode::Themes);
         let theme = Theme::for_preferences(
-            self.config.theme,
-            self.config.appearance,
+            if previewing_appearance {
+                self.pending_theme
+            } else {
+                self.config.theme
+            },
+            if previewing_appearance {
+                self.pending_appearance
+            } else {
+                self.config.appearance
+            },
             window.appearance(),
         );
         if gpui_component::Theme::global(cx).is_dark() == theme.is_light {
@@ -2901,12 +3640,65 @@ impl Render for DevHubLite {
                 gpui_component::ThemeMode::Dark
             };
             gpui_component::Theme::change(mode, None, cx);
-            let component_theme = gpui_component::Theme::global_mut(cx);
-            component_theme.radius = px(1.0);
-            component_theme.radius_lg = px(1.0);
-            component_theme.font_family = UI_FONT.into();
-            component_theme.mono_font_family = MONO_FONT.into();
         }
+        let component_theme = gpui_component::Theme::global_mut(cx);
+        component_theme.radius = px(2.0);
+        component_theme.radius_lg = px(3.0);
+        component_theme.font_family = UI_FONT.into();
+        component_theme.mono_font_family = MONO_FONT.into();
+        component_theme.background = theme.panel_background;
+        component_theme.foreground = theme.text;
+        component_theme.border = theme.border;
+        component_theme.input = theme.border;
+        component_theme.muted = theme.surface_background;
+        component_theme.muted_foreground = theme.text_muted;
+        component_theme.accent = theme.surface_hover;
+        component_theme.accent_foreground = theme.text;
+        component_theme.primary = theme.accent;
+        component_theme.primary_hover = theme.accent_hover;
+        component_theme.primary_active = theme.focus;
+        component_theme.primary_foreground = theme.app_background;
+        component_theme.secondary = theme.surface_background;
+        component_theme.secondary_hover = theme.surface_hover;
+        component_theme.secondary_active = theme.surface_selected;
+        component_theme.secondary_foreground = theme.text;
+        component_theme.selection = theme.surface_selected;
+        component_theme.ring = theme.focus;
+        component_theme.popover = theme.surface_background;
+        component_theme.popover_foreground = theme.text;
+        component_theme.list = theme.panel_background;
+        component_theme.list_hover = theme.surface_hover;
+        component_theme.list_active = theme.surface_selected;
+        component_theme.list_active_border = theme.border_strong;
+        component_theme.scrollbar = theme.panel_background;
+        component_theme.scrollbar_thumb = theme.border_strong;
+        component_theme.scrollbar_thumb_hover = theme.text_disabled;
+        component_theme.danger = theme.error;
+        component_theme.danger_foreground = theme.text;
+        let highlight_theme = Arc::make_mut(&mut component_theme.highlight_theme);
+        highlight_theme.style.editor_background = Some(theme.panel_background);
+        highlight_theme.style.editor_foreground = Some(theme.text);
+        highlight_theme.style.editor_active_line = Some(theme.surface_background);
+        highlight_theme.style.editor_line_number = Some(theme.text_disabled);
+        highlight_theme.style.editor_active_line_number = Some(theme.text_muted);
+        let chrome_button_style = ButtonCustomVariant::new(cx)
+            .foreground(theme.text_muted)
+            .hover(theme.surface_hover)
+            .active(theme.surface_selected);
+        let active_chrome_button_style = ButtonCustomVariant::new(cx)
+            .color(theme.surface_selected)
+            .foreground(theme.accent)
+            .hover(theme.surface_hover)
+            .active(theme.surface_selected);
+        let stop_button_style = ButtonCustomVariant::new(cx)
+            .foreground(theme.error)
+            .hover(theme.error.opacity(0.15))
+            .active(theme.error.opacity(0.25));
+        let project_pill_style = ButtonCustomVariant::new(cx)
+            .color(theme.surface_selected)
+            .foreground(theme.text)
+            .hover(theme.surface_hover)
+            .active(theme.surface_selected);
         let window_active = window.is_window_active();
         let window_maximized = window.is_maximized();
         let project_list_focused = self.focus_handle.is_focused(window);
@@ -2916,11 +3708,6 @@ impl Render for DevHubLite {
             theme.titlebar_inactive_background
         };
         let filtered_indices = self.filtered_indices();
-        let scan_button_label = if self.scan.state == ScanState::Scanning {
-            "Scan again"
-        } else {
-            "Scan"
-        };
         let scan_status = scan_status(&self.scan.state, &self.scan_root);
         let status_color = scan_state_color(theme, &self.scan.state);
         let persistence_status_message = self
@@ -2931,10 +3718,16 @@ impl Render for DevHubLite {
             PersistenceEvent::Recovered { .. } => theme.warning,
             PersistenceEvent::Conflict { .. } => theme.error,
         });
-        let has_active_operations = self.has_active_operations();
+        let scan_in_progress = self.scan_cancellation.is_some();
+        let has_selected_project = self.selected_project().is_some();
+        let selected_project_name = self
+            .selected_project()
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| "devhub".to_string());
         let total_count = self.scan.projects.len();
         let visible_count = filtered_indices.len();
         let filter_active = !self.filter_query.is_empty();
+        let show_filter_status = self.project_catalog_open && filter_active;
 
         let project_row_indices = filtered_indices.clone();
         let project_list_content: AnyElement = match &self.scan.state {
@@ -2974,20 +3767,20 @@ impl Render for DevHubLite {
                 visible_count,
                 cx.processor(
                     move |this, visible_range: std::ops::Range<usize>, _window, cx| {
-                        let menu_open_filtered = this.context_menu.map(|(idx, _, _)| idx);
+                        let menu_project_index = this.context_menu.map(|(idx, _, _)| idx);
                         visible_range
                             .map(|filtered_index| {
                                 let project_index = project_row_indices[filtered_index];
                                 let project = this.scan.projects[project_index].clone();
-                                let is_selected = this.selected == Some(filtered_index);
+                                let is_selected = this.selected == Some(project_index);
                                 let background = if is_selected {
                                     theme.surface_selected
                                 } else {
                                     theme.sidebar_background
                                 };
                                 let type_color = project_type_color(theme, project.project_type);
-                                let show_hover = menu_open_filtered
-                                    .is_none_or(|menu_idx| menu_idx == filtered_index);
+                                let show_hover = menu_project_index
+                                    .is_none_or(|menu_idx| menu_idx == project_index);
 
                                 let is_pinned = this.is_pinned(&project);
                                 div()
@@ -3048,7 +3841,8 @@ impl Render for DevHubLite {
                                             .child(
                                                 div()
                                                     .min_w_0()
-                                                    .flex_1()
+                                                    .w(px(118.0))
+                                                    .max_w(px(118.0))
                                                     .whitespace_nowrap()
                                                     .overflow_hidden()
                                                     .text_size(px(13.0))
@@ -3057,7 +3851,9 @@ impl Render for DevHubLite {
                                             )
                                             .child(
                                                 div()
-                                                    .max_w(px(92.0))
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .text_right()
                                                     .font_family(MONO_FONT)
                                                     .text_size(px(10.0))
                                                     .text_color(theme.text_disabled)
@@ -3084,9 +3880,9 @@ impl Render for DevHubLite {
                                                   event: &gpui::MouseDownEvent,
                                                   _window,
                                                   cx| {
-                                                this.selected = Some(filtered_index);
+                                                this.selected = Some(project_index);
                                                 this.context_menu = Some((
-                                                    filtered_index,
+                                                    project_index,
                                                     event.position.x.into(),
                                                     event.position.y.into(),
                                                 ));
@@ -3095,7 +3891,7 @@ impl Render for DevHubLite {
                                         ),
                                     )
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.select_project(filtered_index, window, cx);
+                                        this.select_project(project_index, window, cx);
                                     }))
                             })
                             .collect::<Vec<_>>()
@@ -3115,6 +3911,20 @@ impl Render for DevHubLite {
             .flex_1()
             .overflow_hidden()
             .child(project_list_content);
+        let project_catalog_panel = self.project_catalog_open.then(|| {
+            self.project_catalog_panel(
+                theme,
+                filter_active,
+                visible_count,
+                total_count,
+                project_list.into_any_element(),
+                cx,
+            )
+        });
+        let launcher_panel = self
+            .launcher
+            .is_some()
+            .then(|| self.launcher_panel(theme, cx));
 
         let app = div()
             .id("app")
@@ -3127,8 +3937,18 @@ impl Render for DevHubLite {
             .on_action(cx.listener(Self::scan_current_folder))
             .on_action(cx.listener(Self::open_selected_project))
             .on_action(cx.listener(Self::focus_project_filter))
+            .on_action(cx.listener(Self::show_command_palette))
+            .on_action(cx.listener(Self::show_project_switcher))
+            .on_action(cx.listener(Self::toggle_project_catalog))
+            .on_action(cx.listener(Self::show_overview))
+            .on_action(cx.listener(Self::show_files))
+            .on_action(cx.listener(Self::show_search))
+            .on_action(cx.listener(Self::toggle_context_pane))
+            .on_action(cx.listener(Self::dismiss_launcher))
+            .on_action(cx.listener(Self::accept_launcher))
             .on_action(cx.listener(Self::note_component_copy))
             .on_key_down(cx.listener(Self::handle_filter_keydown))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -3148,36 +3968,45 @@ impl Render for DevHubLite {
                     .border_b_1()
                     .border_color(theme.border)
                     .bg(titlebar_background)
-                    .child(
-                        div()
-                            .id("settings-button")
-                            .h_full()
-                            .w(px(34.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .text_color(if self.show_settings {
-                                theme.text
+                    .child({
+                        let app = cx.entity();
+                        Button::new("settings-button")
+                            .icon(IconName::Menu)
+                            .tooltip("Settings")
+                            .xsmall()
+                            .compact()
+                            .custom(if self.show_settings {
+                                active_chrome_button_style
                             } else {
-                                theme.text_muted
+                                chrome_button_style
                             })
-                            .cursor_pointer()
-                            .hover(move |style| {
-                                style.bg(theme.surface_hover).text_color(theme.text)
+                            .w(px(24.0))
+                            .h(px(22.0))
+                            .ml_1()
+                            .on_click(move |event, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.toggle_settings(event, window, cx);
+                                });
                             })
-                            .active(move |style| style.bg(theme.surface_selected))
-                            .child(Icon::new(IconName::Menu).size(px(15.0)).text_color(
-                                if self.show_settings {
-                                    theme.text
-                                } else {
-                                    theme.text_muted
-                                },
-                            ))
-                            .on_click(cx.listener(Self::toggle_settings)),
-                    )
+                    })
+                    .child({
+                        let app = cx.entity();
+                        Button::new("project-switcher")
+                            .label(selected_project_name)
+                            .tooltip("Switch project")
+                            .dropdown_caret(true)
+                            .xsmall()
+                            .compact()
+                            .custom(project_pill_style)
+                            .max_w(px(200.0))
+                            .overflow_hidden()
+                            .ml_1()
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.open_launcher(LauncherMode::Projects, window, cx);
+                                });
+                            })
+                    })
                     .child(
                         div()
                             .id("window-drag-region")
@@ -3198,69 +4027,102 @@ impl Render for DevHubLite {
                             })
                             .child(
                                 div()
-                                    .text_size(px(12.0))
-                                    .text_color(if window_active {
-                                        theme.text
-                                    } else {
-                                        theme.text_muted
-                                    })
-                                    .child("devhub"),
-                            )
-                            .child(div().text_color(theme.text_disabled).child("/"))
-                            .child(
-                                div()
                                     .min_w_0()
                                     .whitespace_nowrap()
                                     .overflow_hidden()
                                     .text_size(px(11.0))
                                     .text_color(theme.text_muted)
-                                    .child("local projects"),
+                                    .child(if self.show_settings {
+                                        "Settings"
+                                    } else {
+                                        self.activity.label()
+                                    }),
                             ),
                     )
-                    .child(
-                        div()
-                            .id("scan-current-folder")
-                            .h(px(23.0))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .border_1()
-                            .border_color(theme.border_strong)
-                            .bg(theme.surface_background)
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.0))
-                            .text_color(theme.text_muted)
-                            .cursor_pointer()
-                            .hover(move |style| {
-                                style
-                                    .bg(theme.surface_hover)
-                                    .border_color(theme.text_disabled)
-                                    .text_color(theme.text)
-                            })
-                            .active(move |style| style.bg(theme.surface_selected))
-                            .child(scan_button_label)
-                            .on_click(cx.listener(Self::start_scan)),
+                    .when(
+                        !self.show_settings
+                            && matches!(self.activity, Activity::Files | Activity::Search),
+                        |titlebar| {
+                            let app = cx.entity();
+                            titlebar.child(
+                                Button::new("toggle-context-pane")
+                                    .icon(if self.context_pane_visible {
+                                        IconName::PanelLeftClose
+                                    } else {
+                                        IconName::PanelLeftOpen
+                                    })
+                                    .tooltip("Toggle context pane (Ctrl+B)")
+                                    .xsmall()
+                                    .compact()
+                                    .custom(chrome_button_style)
+                                    .on_click(move |_, _, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.context_pane_visible = !this.context_pane_visible;
+                                            this.resize_target = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                        },
                     )
-                    .when(has_active_operations, |titlebar| {
+                    .child({
+                        let app = cx.entity();
+                        Button::new("open-project-in-zed")
+                            .icon(ZedIcon)
+                            .tooltip("Open project in Zed")
+                            .xsmall()
+                            .compact()
+                            .custom(chrome_button_style)
+                            .w(px(24.0))
+                            .h(px(22.0))
+                            .disabled(!has_selected_project)
+                            .on_click(move |_, _, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.launch_selected_in_zed(cx);
+                                });
+                            })
+                    })
+                    .child({
+                        let app = cx.entity();
+                        Button::new("open-project-with-picker")
+                            .icon(IconName::Ellipsis)
+                            .tooltip("Open project with...")
+                            .xsmall()
+                            .compact()
+                            .custom(chrome_button_style)
+                            .disabled(!has_selected_project)
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.launch_selected_with_picker(window, cx);
+                                });
+                            })
+                    })
+                    .child({
+                        let app = cx.entity();
+                        Button::new("scan-current-folder")
+                            .icon(IconName::Redo2)
+                            .tooltip("Refresh projects (Ctrl+R)")
+                            .xsmall()
+                            .compact()
+                            .custom(chrome_button_style)
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| this.begin_scan(window, cx));
+                            })
+                    })
+                    .when(scan_in_progress, |titlebar| {
+                        let app = cx.entity();
                         titlebar.child(
-                            div()
-                                .id("stop-active-operations")
-                                .h(px(23.0))
-                                .ml_1()
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .border_1()
-                                .border_color(theme.error)
-                                .bg(theme.error.opacity(0.12))
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.0))
-                                .text_color(theme.error)
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(theme.error.opacity(0.22)))
-                                .active(move |style| style.bg(theme.error.opacity(0.3)))
-                                .child("Stop")
-                                .on_click(cx.listener(Self::stop_active_operations)),
+                            Button::new("stop-active-operations")
+                                .icon(IconName::CircleX)
+                                .tooltip("Stop project scan")
+                                .xsmall()
+                                .compact()
+                                .custom(stop_button_style)
+                                .on_click(move |event, window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.stop_scan(event, window, cx);
+                                    });
+                                }),
                         )
                     })
                     .child(
@@ -3291,85 +4153,59 @@ impl Render for DevHubLite {
                             )),
                     ),
             )
-            .child(if self.show_settings {
-                self.settings_panel(theme, cx).into_any_element()
-            } else {
+            .child(
                 div()
+                    .min_w_0()
                     .min_h_0()
                     .flex_1()
                     .flex()
-                    .child(
+                    .child(if self.show_settings {
+                        self.settings_panel(theme, cx).into_any_element()
+                    } else {
                         div()
-                            .w(px(SIDEBAR_WIDTH))
-                            .flex_shrink_0()
+                            .size_full()
+                            .min_h_0()
                             .flex()
-                            .flex_col()
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .bg(theme.sidebar_background)
                             .child(
                                 div()
-                                    .h(px(32.0))
-                                    .flex_shrink_0()
+                                    .size_full()
+                                    .min_w_0()
+                                    .min_h_0()
                                     .flex()
-                                    .items_center()
-                                    .px_1()
-                                    .gap_1()
-                                    .border_b_1()
-                                    .border_color(theme.border)
-                                    .child(
-                                        Input::new(&self.filter_input)
-                                            .min_w_0()
-                                            .flex_1()
-                                            .appearance(false),
-                                    )
-                                    .child(
-                                        div()
-                                            .font_family(MONO_FONT)
-                                            .text_size(px(10.0))
-                                            .text_color(theme.text_disabled)
-                                            .child(if filter_active {
-                                                format!("{visible_count}/{total_count}")
-                                            } else {
-                                                total_count.to_string()
-                                            }),
-                                    ),
+                                    .flex_col()
+                                    .bg(theme.panel_background)
+                                    .child(self.render_details_panel(theme, window, cx)),
                             )
-                            .child(project_list),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .bg(theme.panel_background)
-                            .child(self.render_details_panel(theme, window, cx)),
-                    )
-                    .into_any()
-            })
+                            .into_any()
+                    }),
+            )
             .child(
                 div()
-                    .h(px(22.0))
+                    .h(px(STATUSBAR_HEIGHT))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .px_2()
                     .border_t_1()
                     .border_color(theme.border)
                     .bg(theme.titlebar_background)
                     .text_size(px(10.0))
+                    .child(self.workspace_navigation(theme, cx))
                     .child(
                         div()
                             .min_w_0()
+                            .flex_1()
                             .flex()
                             .items_center()
+                            .justify_end()
                             .gap_2()
+                            .ml_2()
                             .child(div().size(px(5.0)).rounded_full().bg(
                                 if self.launch_error.is_some() {
                                     theme.error
                                 } else if self.copy_feedback.is_some() {
                                     theme.success
-                                } else if filter_active {
+                                } else if show_filter_status {
                                     theme.accent
                                 } else if persistence_status_message.is_some() {
                                     persistence_status_color.unwrap_or(theme.warning)
@@ -3390,7 +4226,7 @@ impl Render for DevHubLite {
                                         .text_color(theme.success)
                                         .whitespace_nowrap()
                                         .child(feedback.clone())
-                                } else if filter_active {
+                                } else if show_filter_status {
                                     div()
                                         .font_family(MONO_FONT)
                                         .text_color(theme.accent)
@@ -3420,27 +4256,12 @@ impl Render for DevHubLite {
                                         .child(scan_status)
                                 },
                             )),
-                    )
-                    .child(
-                        div()
-                            .ml_3()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .font_family(MONO_FONT)
-                            .text_color(theme.text_disabled)
-                            .child("filter  ·  ↑↓ select  ·  Enter Zed  ·  Ctrl+R scan")
-                            .child(
-                                div()
-                                    .max_w(px(200.0))
-                                    .whitespace_nowrap()
-                                    .overflow_hidden()
-                                    .child(self.scan_root.to_string_lossy().into_owned()),
-                            ),
                     ),
-            );
+            )
+            .when_some(project_catalog_panel, |app, catalog| app.child(catalog))
+            .when_some(launcher_panel, |app, launcher| app.child(launcher));
 
-        if let Some((filtered_index, raw_x, raw_y)) = self.context_menu {
+        if let Some((project_index, raw_x, raw_y)) = self.context_menu {
             let bounds = window.bounds();
             let win_w: f32 = bounds.size.width.into();
             let win_h: f32 = bounds.size.height.into();
@@ -3452,20 +4273,20 @@ impl Render for DevHubLite {
             let context_y = context_y.max(0.0);
 
             let is_pinned = self
-                .filtered_indices()
-                .get(filtered_index)
-                .and_then(|&idx| self.scan.projects.get(idx))
+                .scan
+                .projects
+                .get(project_index)
                 .is_some_and(|p| self.is_pinned(p));
 
             let pin_listener = cx.listener(
                 move |this: &mut DevHubLite, _: &gpui::MouseDownEvent, _window, cx| {
-                    this.toggle_pin(filtered_index, cx);
+                    this.toggle_pin(project_index, cx);
                 },
             );
 
             let hide_listener = cx.listener(
                 move |this: &mut DevHubLite, _: &gpui::MouseDownEvent, _window, cx| {
-                    this.toggle_hide(filtered_index, cx);
+                    this.toggle_hide(project_index, cx);
                 },
             );
 
@@ -3530,36 +4351,6 @@ impl Render for DevHubLite {
     }
 }
 
-fn info_card(label: &'static str, value: String, theme: Theme) -> Div {
-    div()
-        .min_w_0()
-        .flex_1()
-        .h_full()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .px_2()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_background)
-        .child(
-            div()
-                .font_family(MONO_FONT)
-                .text_size(px(9.0))
-                .text_color(theme.text_disabled)
-                .child(label),
-        )
-        .child(
-            div()
-                .font_family(MONO_FONT)
-                .text_size(px(10.0))
-                .text_color(theme.text_muted)
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(value),
-        )
-}
-
 fn markdown_raw_source(source: &str) -> String {
     markdown_fenced_source("text", source)
 }
@@ -3602,8 +4393,26 @@ pub(crate) fn run() {
             KeyBinding::new("home", SelectFirstProject, Some("DevHub")),
             KeyBinding::new("end", SelectLastProject, Some("DevHub")),
             KeyBinding::new("ctrl-r", ScanCurrentFolder, Some("DevHub")),
-            KeyBinding::new("enter", OpenSelectedProject, Some("DevHub")),
             KeyBinding::new("ctrl-f", FocusProjectFilter, Some("DevHub")),
+            KeyBinding::new("ctrl-shift-p", ShowCommandPalette, Some("DevHub")),
+            KeyBinding::new("ctrl-p", ShowProjectSwitcher, Some("DevHub")),
+            KeyBinding::new("ctrl-1", ToggleProjectCatalog, Some("DevHub")),
+            KeyBinding::new("ctrl-2", ShowOverview, Some("DevHub")),
+            KeyBinding::new("ctrl-3", ShowFiles, Some("DevHub")),
+            KeyBinding::new("ctrl-4", ShowSearch, Some("DevHub")),
+            KeyBinding::new("ctrl-b", ToggleContextPane, Some("DevHub")),
+            KeyBinding::new("up", SelectPreviousProject, Some("Input && DevHubLauncher")),
+            KeyBinding::new("down", SelectNextProject, Some("Input && DevHubLauncher")),
+            KeyBinding::new("home", SelectFirstProject, Some("Input && DevHubLauncher")),
+            KeyBinding::new("end", SelectLastProject, Some("Input && DevHubLauncher")),
+            KeyBinding::new("escape", DismissLauncher, Some("Input && DevHubLauncher")),
+            KeyBinding::new("enter", AcceptLauncher, Some("Input && DevHubLauncher")),
+            KeyBinding::new("up", SelectPreviousProject, Some("Input && ProjectFilter")),
+            KeyBinding::new("down", SelectNextProject, Some("Input && ProjectFilter")),
+            KeyBinding::new("home", SelectFirstProject, Some("Input && ProjectFilter")),
+            KeyBinding::new("end", SelectLastProject, Some("Input && ProjectFilter")),
+            KeyBinding::new("escape", DismissLauncher, Some("Input && ProjectFilter")),
+            KeyBinding::new("enter", OpenSelectedProject, Some("Input && ProjectFilter")),
         ]);
 
         let bounds = Bounds::centered(None, size(px(900.0), px(600.0)), cx);

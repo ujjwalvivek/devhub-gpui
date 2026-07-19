@@ -32,9 +32,9 @@ pub(crate) fn window_control(
         .font_family("Segoe UI Symbol")
         .text_size(px(if is_close { 16.0 } else { 12.0 }))
         .text_color(if window_active {
-            theme.text_muted
+            theme.text
         } else {
-            theme.text_disabled
+            theme.text_muted
         })
         .hover(move |style| {
             if is_close {

@@ -1,12 +1,16 @@
+mod commands;
 mod diagnostics;
 mod scan;
+mod shell;
 mod theme;
 
+pub use commands::{filtered_commands, filtered_themes, CommandId, CommandSpec, ThemeSelection};
 pub use diagnostics::{persistence_status_text, PersistenceHistory};
+pub use shell::{visible_project_row, Activity};
 
 use std::path::PathBuf;
 
-use devhub_core::Project;
+use devhub_core::{Config, Project, RemoteHostConfig};
 
 pub fn should_show_ftue(config_exists: bool, cache_exists: bool) -> bool {
     !config_exists && !cache_exists
@@ -14,6 +18,17 @@ pub fn should_show_ftue(config_exists: bool, cache_exists: bool) -> bool {
 
 pub fn has_scan_sources(local_roots: usize, remote_hosts: usize) -> bool {
     local_roots > 0 || remote_hosts > 0
+}
+
+pub fn scan_sources_changed(
+    current: &Config,
+    scan_dirs: &[PathBuf],
+    remote_hosts: &[RemoteHostConfig],
+    max_depth: usize,
+) -> bool {
+    current.scan_dirs != scan_dirs
+        || current.remote_hosts != remote_hosts
+        || current.max_depth != max_depth
 }
 
 pub fn filtered_project_indices(projects: &[Project], query: &str) -> Vec<usize> {
@@ -26,10 +41,6 @@ pub fn filtered_project_indices(projects: &[Project], query: &str) -> Vec<usize>
         .enumerate()
         .filter_map(|(index, project)| project.search_key.contains(query).then_some(index))
         .collect()
-}
-
-pub fn accepts_manual_search_character(character: char) -> bool {
-    character.is_ascii_graphic() || character == ' '
 }
 
 pub fn partition_local_scan_roots(roots: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<String>) {
@@ -256,8 +267,8 @@ pub use theme::{Theme, MONO_FONT, UI_FONT};
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        accepts_manual_search_character, filtered_project_indices, has_scan_sources,
-        partition_local_scan_roots, should_show_ftue,
+        filtered_project_indices, has_scan_sources, partition_local_scan_roots,
+        scan_sources_changed, should_show_ftue,
     };
     use devhub_core::{Project, ProjectSource, ProjectType};
     use std::path::PathBuf;
@@ -276,6 +287,32 @@ mod startup_tests {
         assert!(!has_scan_sources(0, 0));
         assert!(has_scan_sources(1, 0));
         assert!(has_scan_sources(0, 1));
+    }
+
+    #[test]
+    fn appearance_only_settings_do_not_require_a_catalog_scan() {
+        let config = devhub_core::Config::default();
+        assert!(!scan_sources_changed(
+            &config,
+            &config.scan_dirs,
+            &config.remote_hosts,
+            config.max_depth,
+        ));
+
+        let mut changed_roots = config.scan_dirs.clone();
+        changed_roots.push(PathBuf::from(r"F:\projects"));
+        assert!(scan_sources_changed(
+            &config,
+            &changed_roots,
+            &config.remote_hosts,
+            config.max_depth,
+        ));
+        assert!(scan_sources_changed(
+            &config,
+            &config.scan_dirs,
+            &config.remote_hosts,
+            config.max_depth + 1,
+        ));
     }
 
     #[test]
@@ -347,13 +384,6 @@ mod startup_tests {
             .iter()
             .all(|project| pinned_paths.contains(&project.path)));
         assert_ne!(projects[0].source.host(), projects[1].source.host());
-    }
-
-    #[test]
-    fn manual_search_input_baseline_rejects_unicode() {
-        assert!(accepts_manual_search_character('a'));
-        assert!(accepts_manual_search_character(' '));
-        assert!(!accepts_manual_search_character('\u{00e9}'));
     }
 
     #[test]
