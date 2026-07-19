@@ -425,6 +425,16 @@ fn run_ssh_script(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
+    let output = run_ssh_script_bytes(host, script, timeout, cancellation)?;
+    String::from_utf8(output).map_err(|_| "SSH output is not valid UTF-8".into())
+}
+
+pub(crate) fn run_ssh_script_bytes(
+    host: &str,
+    script: &str,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, String> {
     cancellation.check()?;
     let host = validate_ssh_host(host)?;
     let mut cmd = Command::new("ssh");
@@ -458,7 +468,7 @@ fn run_ssh_script(
             format!("SSH operation failed for {host}: {detail}")
         });
     }
-    String::from_utf8(output.stdout).map_err(|_| "SSH output is not valid UTF-8".into())
+    Ok(output.stdout)
 }
 
 fn parse_remote_project(line: &str, config: &RemoteHostConfig, host: &str) -> Option<Project> {
@@ -585,7 +595,7 @@ fn project_type_from_label(label: &str) -> ProjectType {
     }
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

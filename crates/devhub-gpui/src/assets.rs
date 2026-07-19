@@ -9,6 +9,11 @@ impl AssetSource for Assets {
         if path == "zed.svg" {
             return Ok(Some(Cow::Borrowed(include_bytes!("../assets/zed.svg"))));
         }
+        if path == "git-branch.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/git-branch.svg"
+            ))));
+        }
         gpui_component_assets::Assets.load(path)
     }
 
@@ -16,6 +21,7 @@ impl AssetSource for Assets {
         let mut assets = gpui_component_assets::Assets.list(path)?;
         if path.is_empty() {
             assets.push("zed.svg".into());
+            assets.push("git-branch.svg".into());
         }
         Ok(assets)
     }

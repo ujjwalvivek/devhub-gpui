@@ -6,6 +6,15 @@ pub enum CommandId {
     ShowOverview,
     ShowFiles,
     ShowSearch,
+    ShowGit,
+    RefreshGit,
+    StageSelectedChange,
+    StageAllChanges,
+    UnstageSelectedChange,
+    UnstageAllChanges,
+    DiscardSelectedChange,
+    FocusGitCommit,
+    FetchGitRemotes,
     OpenInZed,
     OpenWith,
     ToggleProjectPin,
@@ -27,7 +36,7 @@ pub struct CommandSpec {
     pub shortcut: Option<&'static str>,
 }
 
-pub const COMMANDS: [CommandSpec; 15] = [
+pub const COMMANDS: [CommandSpec; 24] = [
     CommandSpec {
         id: CommandId::ToggleProjectCatalog,
         title: "Toggle Project Catalog",
@@ -51,6 +60,60 @@ pub const COMMANDS: [CommandSpec; 15] = [
         title: "Search Project Contents",
         category: "Navigation",
         shortcut: Some("Ctrl+4"),
+    },
+    CommandSpec {
+        id: CommandId::ShowGit,
+        title: "Go to Git Changes",
+        category: "Navigation",
+        shortcut: Some("Ctrl+5"),
+    },
+    CommandSpec {
+        id: CommandId::RefreshGit,
+        title: "Refresh Git Status",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::StageSelectedChange,
+        title: "Stage Selected Change",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::StageAllChanges,
+        title: "Stage All Changes",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::UnstageSelectedChange,
+        title: "Unstage Selected Change",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::UnstageAllChanges,
+        title: "Unstage All Changes",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::DiscardSelectedChange,
+        title: "Discard Selected Change",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::FocusGitCommit,
+        title: "Write Commit Message",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::FetchGitRemotes,
+        title: "Fetch Git Remotes",
+        category: "Git",
+        shortcut: None,
     },
     CommandSpec {
         id: CommandId::OpenInZed,
@@ -313,6 +376,10 @@ mod tests {
             CommandId::ToggleProjectCatalog
         );
         assert_eq!(filtered_commands("prj zed")[0].id, CommandId::OpenInZed);
+        assert_eq!(
+            filtered_commands("git stage")[0].id,
+            CommandId::StageSelectedChange
+        );
     }
 
     #[test]

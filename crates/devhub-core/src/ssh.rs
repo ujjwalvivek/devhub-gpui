@@ -34,7 +34,7 @@ impl OutputStream {
 pub(crate) enum SshRunError {
     Cancelled,
     Timeout {
-        host: String,
+        operation: String,
         timeout: Duration,
     },
     OutputLimitExceeded {
@@ -55,8 +55,8 @@ impl std::fmt::Display for SshRunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str(OPERATION_CANCELLED),
-            Self::Timeout { host, timeout } => {
-                write!(formatter, "SSH operation for {host} timed out after ")?;
+            Self::Timeout { operation, timeout } => {
+                write!(formatter, "{operation} timed out after ")?;
                 if timeout.subsec_nanos() == 0 && timeout.as_secs() > 0 {
                     write!(formatter, "{}s", timeout.as_secs())
                 } else {
@@ -82,10 +82,39 @@ impl std::fmt::Display for SshRunError {
 impl std::error::Error for SshRunError {}
 
 pub(crate) struct SshRunner<'a> {
-    host: &'a str,
+    context: RunnerContext<'a>,
     timeout: Duration,
     output_limit: usize,
     cancellation: &'a CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RunnerContext<'a> {
+    Ssh(&'a str),
+    Process(&'a str),
+}
+
+impl RunnerContext<'_> {
+    fn operation(self) -> String {
+        match self {
+            Self::Ssh(host) => format!("SSH operation for {host}"),
+            Self::Process(label) => label.to_string(),
+        }
+    }
+
+    fn start(self, error: impl std::fmt::Display) -> String {
+        match self {
+            Self::Ssh(host) => format!("starting ssh for {host}: {error}"),
+            Self::Process(label) => format!("starting {label}: {error}"),
+        }
+    }
+
+    fn input(self, error: impl std::fmt::Display) -> String {
+        match self {
+            Self::Ssh(host) => format!("sending SSH request to {host}: {error}"),
+            Self::Process(label) => format!("sending input to {label}: {error}"),
+        }
+    }
 }
 
 impl<'a> SshRunner<'a> {
@@ -96,7 +125,21 @@ impl<'a> SshRunner<'a> {
         cancellation: &'a CancellationToken,
     ) -> Self {
         Self {
-            host,
+            context: RunnerContext::Ssh(host),
+            timeout,
+            output_limit,
+            cancellation,
+        }
+    }
+
+    pub(crate) fn new_process(
+        label: &'a str,
+        timeout: Duration,
+        output_limit: usize,
+        cancellation: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            context: RunnerContext::Process(label),
             timeout,
             output_limit,
             cancellation,
@@ -112,9 +155,9 @@ impl<'a> SshRunner<'a> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = command.spawn().map_err(|error| {
-            SshRunError::Start(format!("starting ssh for {}: {error}", self.host))
-        })?;
+        let child = command
+            .spawn()
+            .map_err(|error| SshRunError::Start(self.context.start(error)))?;
         let mut child = ManagedChild::new(child);
         let stdin = child.take_stdin()?;
         let stdout = child.take_stdout()?;
@@ -144,17 +187,14 @@ impl<'a> SshRunner<'a> {
             }
             if started.elapsed() >= self.timeout {
                 break Err(SshRunError::Timeout {
-                    host: self.host.to_string(),
+                    operation: self.context.operation(),
                     timeout: self.timeout,
                 });
             }
 
             match events_rx.try_recv() {
                 Ok(WorkerEvent::StdinFailed(message)) => {
-                    break Err(SshRunError::Input(format!(
-                        "sending SSH request to {}: {message}",
-                        self.host
-                    )));
+                    break Err(SshRunError::Input(self.context.input(message)));
                 }
                 Ok(WorkerEvent::OutputLimitExceeded(stream)) => {
                     break Err(SshRunError::OutputLimitExceeded {
@@ -186,9 +226,7 @@ impl<'a> SshRunner<'a> {
         if let Some(error) = terminal_error {
             return Err(error);
         }
-        stdin_result.map_err(|message| {
-            SshRunError::Input(format!("sending SSH request to {}: {message}", self.host))
-        })?;
+        stdin_result.map_err(|message| SshRunError::Input(self.context.input(message)))?;
         let stdout = stdout_result.map_err(|error| error.into_run_error(self.output_limit))?;
         let stderr = stderr_result.map_err(|error| error.into_run_error(self.output_limit))?;
 
