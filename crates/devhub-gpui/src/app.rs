@@ -9,23 +9,23 @@ use crate::ui::{
 };
 use devhub_core::{
     cache_path, git_commit_cancellable, git_diff_cancellable, git_discard_cancellable,
-    git_fetch_cancellable, git_stage_all_cancellable, git_stage_cancellable,
-    git_status_cancellable, git_unstage_all_cancellable, git_unstage_cancellable,
-    list_local_subdirs, list_project_tree_cancellable, list_remote_subdirs_cancellable,
-    load_projects_with_diagnostics, local_roots, open_project_in_zed,
-    read_project_file_cancellable, read_project_readme_cancellable, save_projects_with_diagnostics,
-    scan_directories_cancellable, scan_remote_host_cancellable, search_project_content_cancellable,
-    sort_projects, validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode,
-    CancellationToken, Config, DirectoryEntry, FileEntry, GitDiffKind, GitError, GitErrorKind,
-    GitFileChange, GitOperationResult, GitStatus, PersistenceEvent, PersistenceFailure, Project,
-    RemoteHostConfig, SearchHit, ThemeId, TreeListing,
+    git_fetch_cancellable, git_push_cancellable, git_stage_all_cancellable, git_stage_cancellable,
+    git_status_cancellable, git_status_summary_cancellable, git_unstage_all_cancellable,
+    git_unstage_cancellable, list_local_subdirs, list_project_tree_cancellable,
+    list_remote_subdirs_cancellable, load_projects_with_diagnostics, local_roots,
+    open_project_in_zed, read_project_file_cancellable, read_project_readme_cancellable,
+    save_projects_with_diagnostics, scan_directories_cancellable, scan_remote_host_cancellable,
+    search_project_content_cancellable, sort_projects, validate_remote_path, validate_ssh_host,
+    zed_ssh_uri, AppearanceMode, CancellationToken, Config, DirectoryEntry, FileEntry, GitDiffKind,
+    GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus, PersistenceEvent,
+    PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
 };
 use devhub_gpui::{
     filtered_commands, filtered_project_indices, filtered_themes, has_scan_sources,
-    language_for_path, markdown_fenced_source, next_selection, omit_markdown_images,
+    language_for_path, next_selection, omit_markdown_images, parse_unified_diff,
     partition_local_scan_roots, persistence_status_text, previous_selection, scan_sources_changed,
-    should_show_ftue, visible_project_row, Activity, CommandId, CommandSpec, PersistenceHistory,
-    ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
+    should_show_ftue, visible_project_row, Activity, CommandId, CommandSpec, DiffLineKind,
+    PersistenceHistory, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -35,14 +35,19 @@ use gpui_component::highlighter::HighlightTheme;
 use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{Disableable, Icon, IconName, IconNamed, Selectable, Sizable};
+use notify::{RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-const TITLEBAR_HEIGHT: f32 = 34.0;
+const TITLEBAR_HEIGHT: f32 = 28.0;
 const PROJECT_ROW_HEIGHT: f32 = 30.0;
 const STATUSBAR_HEIGHT: f32 = 22.0;
+const GIT_WATCH_TICK: Duration = Duration::from_millis(100);
+const GIT_WATCH_QUIET_TICKS: usize = 2;
+const GIT_REMOTE_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
+const MAX_RENDERED_DIFF_LINES: usize = 5_000;
 
 #[derive(Clone, Copy)]
 struct ZedIcon;
@@ -90,6 +95,7 @@ struct DevHubLite {
     scan: ScanModel,
     scan_cancellation: Option<CancellationToken>,
     selected: Option<usize>, // Stable index into scan.projects, never a filtered row.
+    missing_project: Option<ProjectLocator>,
     filter_query: String,
     launch_error: Option<String>,
     persistence_history: PersistenceHistory,
@@ -143,6 +149,7 @@ struct DevHubLite {
     git_status_state: LoadState<GitStatus>,
     git_status_generation: u64,
     git_status_cancellation: Option<CancellationToken>,
+    git_refresh_generation: u64,
     git_selection: Option<GitSelection>,
     git_diff_state: LoadState<String>,
     git_diff_generation: u64,
@@ -151,6 +158,9 @@ struct DevHubLite {
     git_operation_cancellation: Option<CancellationToken>,
     git_notice: Option<GitNotice>,
     git_scroll: ScrollHandle,
+    git_tree_view: bool,
+    git_collapsed_dirs: HashSet<(GitDiffKind, PathBuf)>,
+    git_context_menu: Option<(GitSelection, f32, f32)>,
     git_commit_input: Entity<InputState>,
     _git_commit_subscription: Subscription,
     git_commit_message: String,
@@ -193,6 +203,14 @@ struct GitSelection {
     kind: GitDiffKind,
 }
 
+#[derive(Clone)]
+struct GitTreeEntry {
+    path: PathBuf,
+    label: String,
+    depth: usize,
+    selection: Option<GitSelection>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GitNoticeTone {
     Working,
@@ -203,6 +221,7 @@ enum GitNoticeTone {
 struct GitNotice {
     text: String,
     tone: GitNoticeTone,
+    automatic: bool,
 }
 
 enum GitAction {
@@ -213,6 +232,7 @@ enum GitAction {
     Discard(GitFileChange),
     Commit { message: String, amend: bool },
     Fetch,
+    Push { set_upstream: bool },
 }
 
 enum LoadState<T> {
@@ -250,8 +270,12 @@ impl DevHubLite {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search file contents"));
         let _search_subscription =
             cx.subscribe_in(&search_input, window, Self::on_search_input_event);
-        let git_commit_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
+        let git_commit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Commit message")
+                .multi_line(true)
+                .rows(2)
+        });
         let _git_commit_subscription =
             cx.subscribe_in(&git_commit_input, window, Self::on_git_commit_input_event);
         window.focus(&focus_handle);
@@ -302,6 +326,7 @@ impl DevHubLite {
             scan: ScanModel::new(initial_projects),
             scan_cancellation: None,
             selected: None,
+            missing_project: None,
             filter_query: String::new(),
             launch_error: (!startup_errors.is_empty()).then(|| startup_errors.join(" | ")),
             persistence_history,
@@ -355,6 +380,7 @@ impl DevHubLite {
             git_status_state: LoadState::Idle,
             git_status_generation: 0,
             git_status_cancellation: None,
+            git_refresh_generation: 0,
             git_selection: None,
             git_diff_state: LoadState::Idle,
             git_diff_generation: 0,
@@ -363,6 +389,9 @@ impl DevHubLite {
             git_operation_cancellation: None,
             git_notice: None,
             git_scroll: ScrollHandle::new(),
+            git_tree_view: false,
+            git_collapsed_dirs: HashSet::new(),
+            git_context_menu: None,
             git_commit_input,
             _git_commit_subscription,
             git_commit_message: String::new(),
@@ -388,6 +417,7 @@ impl DevHubLite {
     ) {
         window.focus(&self.focus_handle);
         self.context_menu = None;
+        self.git_context_menu = None;
         self.project_catalog_open = false;
         self.resize_target = None;
         self.set_selected(project_index, cx);
@@ -415,6 +445,7 @@ impl DevHubLite {
         self.readme_generation = self.readme_generation.wrapping_add(1);
         self.readme_state = LoadState::Idle;
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
         self.git_status_state = LoadState::Idle;
         self.git_selection = None;
         self.git_diff_generation = self.git_diff_generation.wrapping_add(1);
@@ -424,6 +455,7 @@ impl DevHubLite {
         self.clear_git_commit_message(cx);
         self.git_amend = false;
         self.git_pending_discard = None;
+        self.git_context_menu = None;
         cx.notify();
     }
 
@@ -471,6 +503,71 @@ impl DevHubLite {
                 false
             }
         }
+    }
+
+    fn restore_last_project(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.missing_project = None;
+        if let Some(locator) = self.config.last_project.clone() {
+            if let Some(index) = self
+                .scan
+                .projects
+                .iter()
+                .position(|project| project_locator_matches(project, &locator))
+            {
+                let project = &self.scan.projects[index];
+                if self.is_hidden(project) {
+                    // Hidden projects do not take over the workspace on startup.
+                } else if project.source.is_remote() || project.path.is_dir() {
+                    self.set_selected(index, cx);
+                    return;
+                } else {
+                    self.missing_project = Some(locator);
+                    self.reset_workspace(cx);
+                    return;
+                }
+            } else {
+                self.missing_project = Some(locator);
+                self.reset_workspace(cx);
+                return;
+            }
+        }
+
+        if let Some(index) = self
+            .scan
+            .projects
+            .iter()
+            .position(|project| !self.is_hidden(project))
+        {
+            self.set_selected(index, cx);
+        } else {
+            self.reset_workspace(cx);
+        }
+    }
+
+    fn remember_project(&mut self, project: &Project) {
+        let locator = project_locator(project);
+        if self.config.last_project.as_ref() == Some(&locator) {
+            return;
+        }
+        self.config.last_project = Some(locator);
+        self.save_config();
+    }
+
+    fn forget_missing_project(&mut self, cx: &mut Context<Self>) {
+        let Some(locator) = self.missing_project.take() else {
+            return;
+        };
+        self.scan
+            .projects
+            .retain(|project| !project_locator_matches(project, &locator));
+        self.config.last_project = None;
+        self.save_config();
+        match save_projects_with_diagnostics(&self.scan.projects) {
+            Ok(report) => self.persistence_history.record_events(report.events),
+            Err(error) => self.record_persistence_failure(error),
+        }
+        self.restore_last_project(cx);
     }
 
     fn toggle_pin(&mut self, project_index: usize, cx: &mut Context<Self>) {
@@ -599,6 +696,7 @@ impl DevHubLite {
                                 this.record_persistence_failure(error);
                             }
                         }
+                        this.restore_last_project(cx);
                     }
                     cx.notify();
                 }
@@ -614,7 +712,10 @@ impl DevHubLite {
         if self.selected == Some(project_index) {
             return;
         }
+        let project = self.scan.projects[project_index].clone();
         self.selected = Some(project_index);
+        self.missing_project = None;
+        self.remember_project(&project);
         if let Some(row) = visible_project_row(&self.filtered_indices(), self.selected) {
             self.project_scroll
                 .scroll_to_item(row, ScrollStrategy::Center);
@@ -624,7 +725,10 @@ impl DevHubLite {
             Activity::Overview => self.load_readme(cx),
             Activity::Files => self.load_tree(cx),
             Activity::Search => {}
-            Activity::Git => self.load_git_status(cx),
+            Activity::Git => {
+                self.load_git_status(cx);
+                self.start_git_auto_refresh(cx);
+            }
         }
     }
 
@@ -781,34 +885,56 @@ impl DevHubLite {
     }
 
     fn load_git_status(&mut self, cx: &mut Context<Self>) {
-        self.load_git_status_inner(false, cx);
+        self.load_git_status_inner(false, false, true, cx);
     }
 
     fn reload_git_status_after_operation(&mut self, cx: &mut Context<Self>) {
-        self.load_git_status_inner(true, cx);
+        self.load_git_status_inner(true, false, true, cx);
     }
 
-    fn load_git_status_inner(&mut self, preserve_notice: bool, cx: &mut Context<Self>) {
+    fn auto_refresh_git_status(&mut self, include_stats: bool, cx: &mut Context<Self>) {
+        if self.activity != Activity::Git
+            || self.git_operation_running()
+            || self.git_status_cancellation.is_some()
+        {
+            return;
+        }
+        self.load_git_status_inner(true, true, include_stats, cx);
+    }
+
+    fn load_git_status_inner(
+        &mut self,
+        preserve_notice: bool,
+        quiet: bool,
+        include_stats: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.selected_project().cloned() else {
             return;
         };
         self.git_status_generation = self.git_status_generation.wrapping_add(1);
         let generation = self.git_status_generation;
         Self::cancel_token(&mut self.git_status_cancellation);
-        Self::cancel_token(&mut self.git_diff_cancellation);
         let cancellation = CancellationToken::new();
         self.git_status_cancellation = Some(cancellation.clone());
-        self.git_status_state = LoadState::Loading;
-        self.git_diff_state = LoadState::Idle;
+        if !quiet {
+            Self::cancel_token(&mut self.git_diff_cancellation);
+            self.git_status_state = LoadState::Loading;
+            self.git_diff_state = LoadState::Idle;
+        }
         if !preserve_notice {
             self.git_notice = None;
         }
         cx.notify();
 
         let request_project = project.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { git_status_cancellable(&project, &cancellation) });
+        let task = cx.background_executor().spawn(async move {
+            if include_stats {
+                git_status_cancellable(&project, &cancellation)
+            } else {
+                git_status_summary_cancellable(&project, &cancellation)
+            }
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -819,7 +945,12 @@ impl DevHubLite {
                 }
                 this.git_status_cancellation = None;
                 match result {
-                    Ok(status) => {
+                    Ok(mut status) => {
+                        if !include_stats {
+                            if let LoadState::Loaded(previous) = &this.git_status_state {
+                                status.inherit_line_stats(previous);
+                            }
+                        }
                         let selections = Self::git_selections(&status);
                         let selected = this
                             .git_selection
@@ -828,15 +959,25 @@ impl DevHubLite {
                             .or_else(|| selections.first().cloned());
                         this.git_selection = selected;
                         this.git_status_state = LoadState::Loaded(status);
-                        this.load_git_diff(cx);
+                        if this
+                            .git_notice
+                            .as_ref()
+                            .is_some_and(|notice| notice.automatic)
+                        {
+                            this.git_notice = None;
+                        }
+                        this.load_git_diff_inner(quiet, cx);
                     }
                     Err(error) => {
-                        this.git_selection = None;
-                        this.git_diff_state = LoadState::Idle;
-                        this.git_status_state = LoadState::Error(error.status_text().into());
+                        if !quiet {
+                            this.git_selection = None;
+                            this.git_diff_state = LoadState::Idle;
+                            this.git_status_state = LoadState::Error(error.status_text().into());
+                        }
                         this.git_notice = Some(GitNotice {
                             text: git_error_notice(&error),
                             tone: GitNoticeTone::Error,
+                            automatic: quiet,
                         });
                     }
                 }
@@ -847,6 +988,10 @@ impl DevHubLite {
     }
 
     fn load_git_diff(&mut self, cx: &mut Context<Self>) {
+        self.load_git_diff_inner(false, cx);
+    }
+
+    fn load_git_diff_inner(&mut self, quiet: bool, cx: &mut Context<Self>) {
         let (Some(project), Some(selection)) =
             (self.selected_project().cloned(), self.git_selection.clone())
         else {
@@ -859,7 +1004,9 @@ impl DevHubLite {
         Self::cancel_token(&mut self.git_diff_cancellation);
         let cancellation = CancellationToken::new();
         self.git_diff_cancellation = Some(cancellation.clone());
-        self.git_diff_state = LoadState::Loading;
+        if !quiet {
+            self.git_diff_state = LoadState::Loading;
+        }
         cx.notify();
 
         let request_project = project.clone();
@@ -884,6 +1031,111 @@ impl DevHubLite {
                 };
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    fn start_git_auto_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
+        let generation = self.git_refresh_generation;
+
+        if project.source.is_remote() {
+            cx.spawn(async move |this, cx| {
+                let mut polls = 0usize;
+                loop {
+                    cx.background_executor()
+                        .timer(GIT_REMOTE_POLL_INTERVAL)
+                        .await;
+                    polls = polls.wrapping_add(1);
+                    let active = this
+                        .update(cx, |this, cx| {
+                            if this.git_refresh_generation != generation
+                                || this.activity != Activity::Git
+                                || this.show_settings
+                                || this.selected_project() != Some(&project)
+                            {
+                                return false;
+                            }
+                            this.auto_refresh_git_status(polls.is_multiple_of(3), cx);
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !active {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            return;
+        }
+
+        let root = project.path.clone();
+        let git_directory = local_git_directory(&root);
+        cx.spawn(async move |this, cx| {
+            let (sender, receiver) =
+                std::sync::mpsc::sync_channel::<notify::Result<notify::Event>>(256);
+            let mut watcher = notify::recommended_watcher(move |event| {
+                let _ = sender.try_send(event);
+            })
+            .ok();
+            let watching = watcher.as_mut().is_some_and(|watcher| {
+                if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+                    return false;
+                }
+                git_directory.starts_with(&root)
+                    || watcher
+                        .watch(&git_directory, RecursiveMode::Recursive)
+                        .is_ok()
+            });
+            let mut dirty = false;
+            let mut quiet_ticks = 0usize;
+            let mut fallback_ticks = 0usize;
+
+            loop {
+                cx.background_executor().timer(GIT_WATCH_TICK).await;
+                let active = this
+                    .update(cx, |this, _| {
+                        this.git_refresh_generation == generation
+                            && this.activity == Activity::Git
+                            && !this.show_settings
+                            && this.selected_project() == Some(&project)
+                    })
+                    .unwrap_or(false);
+                if !active {
+                    break;
+                }
+
+                if watching {
+                    let mut saw_relevant_event = false;
+                    while let Ok(event) = receiver.try_recv() {
+                        if event.as_ref().is_ok_and(|event| {
+                            git_watch_event_is_relevant(&root, &git_directory, event)
+                        }) {
+                            saw_relevant_event = true;
+                        }
+                    }
+                    if saw_relevant_event {
+                        dirty = true;
+                        quiet_ticks = 0;
+                    } else if dirty {
+                        quiet_ticks += 1;
+                    }
+                    if dirty && quiet_ticks >= GIT_WATCH_QUIET_TICKS {
+                        let _ = this.update(cx, |this, cx| this.auto_refresh_git_status(true, cx));
+                        dirty = false;
+                        quiet_ticks = 0;
+                    }
+                } else {
+                    fallback_ticks += 1;
+                    if fallback_ticks >= 10 {
+                        let _ = this.update(cx, |this, cx| this.auto_refresh_git_status(true, cx));
+                        fallback_ticks = 0;
+                    }
+                }
+            }
         })
         .detach();
     }
@@ -941,15 +1193,18 @@ impl DevHubLite {
         let cancellation = CancellationToken::new();
         self.git_operation_cancellation = Some(cancellation.clone());
         self.git_pending_discard = None;
+        self.git_context_menu = None;
         self.git_notice = Some(GitNotice {
             text: match &action {
                 GitAction::Fetch => "Fetching remotes...",
+                GitAction::Push { .. } => "Pushing current branch...",
                 GitAction::Commit { amend: true, .. } => "Amending commit...",
                 GitAction::Commit { .. } => "Creating commit...",
                 _ => "Updating working tree...",
             }
             .into(),
             tone: GitNoticeTone::Working,
+            automatic: false,
         });
         cx.notify();
 
@@ -970,6 +1225,9 @@ impl DevHubLite {
                     git_commit_cancellable(&project, &message, amend, &cancellation)
                 }
                 GitAction::Fetch => git_fetch_cancellable(&project, &cancellation),
+                GitAction::Push { set_upstream } => {
+                    git_push_cancellable(&project, set_upstream, &cancellation)
+                }
             }
         });
         cx.spawn(async move |this, cx| {
@@ -986,6 +1244,7 @@ impl DevHubLite {
                         this.git_notice = Some(GitNotice {
                             text: result.summary,
                             tone: GitNoticeTone::Success,
+                            automatic: false,
                         });
                         if clears_commit_message {
                             this.clear_git_commit_message(cx);
@@ -996,6 +1255,7 @@ impl DevHubLite {
                         this.git_notice = Some(GitNotice {
                             text: git_error_notice(&error),
                             tone: GitNoticeTone::Error,
+                            automatic: false,
                         });
                         cx.notify();
                     }
@@ -1187,6 +1447,13 @@ impl DevHubLite {
                     .update(cx, |input, cx| input.focus(window, cx));
             }
             CommandId::FetchGitRemotes => self.run_git_action(GitAction::Fetch, cx),
+            CommandId::PushGitBranch => {
+                let set_upstream = matches!(
+                    &self.git_status_state,
+                    LoadState::Loaded(status) if status.upstream.is_none()
+                );
+                self.run_git_action(GitAction::Push { set_upstream }, cx);
+            }
             CommandId::OpenInZed => self.launch_selected_in_zed(cx),
             CommandId::OpenWith => self.launch_selected_with_picker(window, cx),
             CommandId::ToggleProjectPin => {
@@ -1263,16 +1530,18 @@ impl DevHubLite {
                     && !self.git_operation_running()
                     && self.git_has_staged_changes()
             }
-            CommandId::FetchGitRemotes => {
+            CommandId::FetchGitRemotes | CommandId::PushGitBranch => {
                 self.activity == Activity::Git
                     && !self.git_operation_running()
-                    && self.selected_project().is_some_and(|project| {
-                        project.git_remote.is_some()
-                            || matches!(
-                                &self.git_status_state,
-                                LoadState::Loaded(status) if status.upstream.is_some()
-                            )
-                    })
+                    && self
+                        .selected_project()
+                        .is_some_and(|project| project.has_git)
+                    && (command != CommandId::PushGitBranch
+                        || matches!(
+                            &self.git_status_state,
+                            LoadState::Loaded(status)
+                                if status.branch.as_deref().is_some_and(|branch| branch != "detached")
+                        ))
             }
             CommandId::StageSelectedChange => {
                 self.activity == Activity::Git
@@ -1475,6 +1744,9 @@ impl DevHubLite {
             self.pending_theme = self.config.theme;
             self.pending_appearance = self.config.appearance;
             self.source_picker = SourcePicker::Closed;
+            if self.activity == Activity::Git {
+                self.start_git_auto_refresh(cx);
+            }
         } else {
             self.open_settings(window, cx);
         }
@@ -1482,6 +1754,7 @@ impl DevHubLite {
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
         self.show_settings = true;
         self.project_catalog_open = false;
         self.launcher = None;
@@ -1784,6 +2057,8 @@ impl DevHubLite {
                 self.show_settings = false;
                 if sources_changed {
                     self.begin_scan(window, cx);
+                } else if self.activity == Activity::Git {
+                    self.start_git_auto_refresh(cx);
                 }
             }
             Err(error) => self.record_persistence_failure(error),
@@ -1799,6 +2074,9 @@ impl DevHubLite {
         self.pending_theme = self.config.theme;
         self.pending_appearance = self.config.appearance;
         self.source_picker = SourcePicker::Closed;
+        if self.activity == Activity::Git {
+            self.start_git_auto_refresh(cx);
+        }
         cx.notify();
     }
 
@@ -2596,8 +2874,11 @@ impl DevHubLite {
     }
 
     fn set_activity(&mut self, activity: Activity, window: &mut Window, cx: &mut Context<Self>) {
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
         self.show_settings = false;
         self.project_catalog_open = false;
+        self.context_menu = None;
+        self.git_context_menu = None;
         self.activity = activity;
         match activity {
             Activity::Files if matches!(self.tree_state, LoadState::Idle) => self.load_tree(cx),
@@ -2614,6 +2895,7 @@ impl DevHubLite {
                 if matches!(self.git_status_state, LoadState::Idle) {
                     self.load_git_status(cx);
                 }
+                self.start_git_auto_refresh(cx);
                 window.focus(&self.focus_handle);
             }
             _ => window.focus(&self.focus_handle),
@@ -2937,6 +3219,43 @@ impl DevHubLite {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(project) = self.selected_project().cloned() else {
+            if let Some(locator) = &self.missing_project {
+                let app = cx.entity();
+                return div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(theme.text_muted)
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .text_color(theme.text)
+                            .child("Project not found"),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(560.0))
+                            .font_family(MONO_FONT)
+                            .text_size(px(10.0))
+                            .text_color(theme.text_disabled)
+                            .child(locator.path.to_string_lossy().into_owned()),
+                    )
+                    .child(
+                        Button::new("forget-missing-project")
+                            .icon(IconName::Delete)
+                            .label("Remove entry")
+                            .small()
+                            .compact()
+                            .danger()
+                            .on_click(move |_, _, cx| {
+                                app.update(cx, |this, cx| this.forget_missing_project(cx));
+                            }),
+                    )
+                    .into_any_element();
+            }
             return div()
                 .size_full()
                 .flex()
@@ -2983,20 +3302,42 @@ impl DevHubLite {
 
         let readme: AnyElement = match &self.readme_state {
             LoadState::Loaded(document) => {
-                let source = if self.readme_preview {
-                    omit_markdown_images(document)
+                if self.readme_preview {
+                    TextView::markdown("project-readme", omit_markdown_images(document), window, cx)
+                        .style(readme_style)
+                        .selectable(true)
+                        .scrollable(true)
+                        .size_full()
+                        .px_3()
+                        .py_2()
+                        .text_color(theme.text_muted)
+                        .into_any_element()
                 } else {
-                    markdown_raw_source(document)
-                };
-                TextView::markdown("project-readme", source, window, cx)
-                    .style(readme_style)
-                    .selectable(true)
-                    .scrollable(true)
-                    .size_full()
-                    .px_3()
-                    .py_2()
-                    .text_color(theme.text_muted)
-                    .into_any_element()
+                    let editor =
+                        window.use_keyed_state("readme-source-editor", cx, |window, cx| {
+                            InputState::new(window, cx)
+                                .code_editor("markdown")
+                                .line_number(true)
+                                .soft_wrap(true)
+                                .default_value(document.clone())
+                        });
+                    if editor.read(cx).value().as_ref() != document {
+                        editor.update(cx, |editor, cx| {
+                            editor.set_highlighter("markdown", cx);
+                            editor.set_value(document.clone(), window, cx);
+                            editor.set_soft_wrap(true, window, cx);
+                        });
+                    }
+                    Input::new(&editor)
+                        .disabled(true)
+                        .appearance(false)
+                        .focus_bordered(false)
+                        .p_0()
+                        .bg(theme.panel_background)
+                        .text_size(px(11.0))
+                        .h_full()
+                        .into_any_element()
+                }
             }
             LoadState::Loading => workbench_message("loading README...", theme.text_disabled),
             LoadState::Error(error) => workbench_message(error.clone(), theme.error),
@@ -3380,7 +3721,7 @@ impl DevHubLite {
             .focus_bordered(false)
             .p_0()
             .bg(theme.panel_background)
-            .text_size(px(12.0))
+            .text_size(px(11.0))
             .h_full();
         let editor_for_wrap = editor.clone();
         let app_for_copy = app.clone();
@@ -3628,27 +3969,16 @@ impl DevHubLite {
 
     fn git_change_row(
         &self,
-        change: &GitFileChange,
-        kind: GitDiffKind,
+        selection: GitSelection,
         row_id: (&'static str, usize),
+        label: String,
+        depth: usize,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selection = GitSelection {
-            change: change.clone(),
-            kind,
-        };
+        let change = &selection.change;
+        let kind = selection.kind;
         let is_selected = self.git_selection.as_ref() == Some(&selection);
-        let path = change.original_path.as_ref().map_or_else(
-            || change.path.to_string_lossy().into_owned(),
-            |original| {
-                format!(
-                    "{} -> {}",
-                    original.to_string_lossy(),
-                    change.path.to_string_lossy()
-                )
-            },
-        );
         let status = match kind {
             GitDiffKind::Unstaged => change.worktree_status,
             GitDiffKind::Staged => change.index_status,
@@ -3668,6 +3998,18 @@ impl DevHubLite {
             theme.warning
         };
         let app = cx.entity();
+        let app_for_action = app.clone();
+        let action_path = change.path.clone();
+        let (action_icon, action_tooltip) = match kind {
+            GitDiffKind::Unstaged => (IconName::Plus, "Stage change"),
+            GitDiffKind::Staged => (IconName::Minus, "Unstage change"),
+        };
+        let line_stats = change.line_stats(kind);
+        let additions = line_stats.and_then(|stats| stats.additions);
+        let deletions = line_stats.and_then(|stats| stats.deletions);
+        let operation_running = self.git_operation_running();
+        let context_selection = selection.clone();
+        let select_selection = selection.clone();
 
         div()
             .id(row_id)
@@ -3676,7 +4018,8 @@ impl DevHubLite {
             .flex()
             .items_center()
             .gap_2()
-            .px_2()
+            .pl(px(6.0 + depth as f32 * 13.0))
+            .pr_1()
             .cursor_pointer()
             .bg(if is_selected {
                 theme.surface_selected
@@ -3706,20 +4049,178 @@ impl DevHubLite {
                     })
                     .whitespace_nowrap()
                     .overflow_hidden()
-                    .child(path),
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .font_family(MONO_FONT)
+                    .text_size(px(9.0))
+                    .child(
+                        div()
+                            .text_color(theme.success)
+                            .child(format!("+{}", git_stat_value(additions))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.error)
+                            .child(format!("-{}", git_stat_value(deletions))),
+                    ),
+            )
+            .child(
+                Button::new(("git-row-action", row_id.1))
+                    .icon(action_icon)
+                    .tooltip(action_tooltip)
+                    .xsmall()
+                    .compact()
+                    .ghost()
+                    .disabled(operation_running)
+                    .on_click(move |_, _, cx| {
+                        let action = match kind {
+                            GitDiffKind::Unstaged => GitAction::Stage(vec![action_path.clone()]),
+                            GitDiffKind::Staged => GitAction::Unstage(vec![action_path.clone()]),
+                        };
+                        app_for_action.update(cx, |this, cx| {
+                            this.run_git_action(action, cx);
+                        });
+                    }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.select_git_change(context_selection.clone(), cx);
+                    this.context_menu = None;
+                    this.git_context_menu = Some((
+                        context_selection.clone(),
+                        event.position.x.into(),
+                        event.position.y.into(),
+                    ));
+                    cx.notify();
+                }),
             )
             .on_click(move |_, _, cx| {
                 app.update(cx, |this, cx| {
-                    this.select_git_change(selection.clone(), cx);
+                    this.select_git_change(select_selection.clone(), cx);
                 });
             })
             .into_any_element()
     }
 
+    fn git_change_rows(
+        &self,
+        changes: &[&GitFileChange],
+        kind: GitDiffKind,
+        row_prefix: &'static str,
+        row_index: &mut usize,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        if !self.git_tree_view {
+            return changes
+                .iter()
+                .map(|change| {
+                    let index = *row_index;
+                    *row_index += 1;
+                    self.git_change_row(
+                        GitSelection {
+                            change: (*change).clone(),
+                            kind,
+                        },
+                        (row_prefix, index),
+                        git_change_label(change),
+                        0,
+                        theme,
+                        cx,
+                    )
+                })
+                .collect();
+        }
+
+        let app = cx.entity();
+        git_tree_entries(changes, kind)
+            .into_iter()
+            .filter(|entry| {
+                !self
+                    .git_collapsed_dirs
+                    .iter()
+                    .any(|(collapsed_kind, path)| {
+                        *collapsed_kind == kind
+                            && entry.path != *path
+                            && entry.path.starts_with(path)
+                    })
+            })
+            .map(|entry| {
+                let index = *row_index;
+                *row_index += 1;
+                let app_for_entry = app.clone();
+                if let Some(selection) = entry.selection {
+                    return self.git_change_row(
+                        selection,
+                        (row_prefix, index),
+                        entry.label,
+                        entry.depth,
+                        theme,
+                        cx,
+                    );
+                }
+
+                let path = entry.path;
+                let collapsed = self.git_collapsed_dirs.contains(&(kind, path.clone()));
+                let path_for_click = path.clone();
+                div()
+                    .id(("git-tree-directory", index))
+                    .h(px(23.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pl(px(4.0 + entry.depth as f32 * 13.0))
+                    .pr_1()
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.0))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(theme.surface_hover))
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(px(11.0))
+                        .text_color(theme.text_disabled),
+                    )
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::FolderClosed
+                        } else {
+                            IconName::FolderOpen
+                        })
+                        .size(px(12.0))
+                        .text_color(theme.accent),
+                    )
+                    .child(entry.label)
+                    .on_click(move |_, _, cx| {
+                        app_for_entry.update(cx, |this, cx| {
+                            let key = (kind, path_for_click.clone());
+                            if !this.git_collapsed_dirs.remove(&key) {
+                                this.git_collapsed_dirs.insert(key);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn git_diff_panel(
         &self,
         theme: Theme,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(selection) = self.git_selection.clone() else {
@@ -3795,26 +4296,54 @@ impl DevHubLite {
 
         let content = match &self.git_diff_state {
             LoadState::Loaded(diff) => {
-                let editor = window.use_keyed_state("git-diff-editor", cx, |window, cx| {
-                    InputState::new(window, cx)
-                        .code_editor("diff")
-                        .line_number(true)
-                        .default_value(diff.clone())
-                });
-                if editor.read(cx).value().as_ref() != diff {
-                    editor.update(cx, |editor, cx| {
-                        editor.set_highlighter("diff", cx);
-                        editor.set_value(diff.clone(), window, cx);
-                    });
-                }
-                Input::new(&editor)
-                    .disabled(true)
-                    .appearance(false)
-                    .focus_bordered(false)
-                    .p_0()
+                let (lines, truncated) = parse_unified_diff(diff, MAX_RENDERED_DIFF_LINES);
+                div()
+                    .id("git-diff-scroll")
+                    .size_full()
+                    .overflow_scroll()
                     .bg(theme.panel_background)
-                    .text_size(px(11.0))
-                    .h_full()
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.0))
+                    .children(lines.into_iter().enumerate().map(|(index, line)| {
+                        let (background, foreground) = match line.kind {
+                            DiffLineKind::Addition => (theme.success.opacity(0.14), theme.success),
+                            DiffLineKind::Deletion => (theme.error.opacity(0.14), theme.error),
+                            DiffLineKind::HunkHeader => (theme.accent.opacity(0.10), theme.accent),
+                            DiffLineKind::FileHeader => (theme.surface_background, theme.text),
+                            DiffLineKind::Context => (theme.panel_background, theme.text_muted),
+                            DiffLineKind::Metadata => (theme.panel_background, theme.text_disabled),
+                        };
+                        div()
+                            .id(("git-diff-line", index))
+                            .h(px(19.0))
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .bg(background)
+                            .text_color(foreground)
+                            .child(diff_gutter_number(line.old_line, theme))
+                            .child(diff_gutter_number(line.new_line, theme))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .pr_4()
+                                    .whitespace_nowrap()
+                                    .child(line.text),
+                            )
+                    }))
+                    .when(truncated, |diff| {
+                        diff.child(
+                            div()
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .bg(theme.warning.opacity(0.10))
+                                .text_color(theme.warning)
+                                .child("Diff truncated. Use Zed or Git for the complete patch."),
+                        )
+                    })
                     .into_any_element()
             }
             LoadState::Loading => workbench_message("loading diff...", theme.text_disabled),
@@ -3858,6 +4387,27 @@ impl DevHubLite {
                                 GitDiffKind::Staged => "Staged",
                             }),
                     )
+                    .child(
+                        Button::new("git-copy-diff")
+                            .icon(IconName::Copy)
+                            .tooltip("Copy diff")
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .on_click({
+                                let app = app.clone();
+                                move |_, _, cx| {
+                                    app.update(cx, |this, cx| {
+                                        if let LoadState::Loaded(diff) = &this.git_diff_state {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                diff.clone(),
+                                            ));
+                                            this.show_copy_feedback("COPIED DIFF", cx);
+                                        }
+                                    });
+                                }
+                            }),
+                    )
                     .child(actions),
             )
             .child(div().min_h_0().flex_1().overflow_hidden().child(content))
@@ -3897,14 +4447,42 @@ impl DevHubLite {
                     (0, behind) => format!("{behind} behind"),
                     (ahead, behind) => format!("{ahead} ahead · {behind} behind"),
                 };
-                let fetch_enabled = status.upstream.is_some()
-                    || self
-                        .selected_project()
-                        .is_some_and(|project| project.git_remote.is_some());
-                let app_for_refresh = app.clone();
+                let (total_additions, total_deletions) = status.line_totals();
+                let fetch_enabled = self
+                    .selected_project()
+                    .is_some_and(|project| project.has_git);
+                let set_upstream = status.upstream.is_none();
+                let push_enabled =
+                    fetch_enabled && branch != "detached" && branch != "detached HEAD";
                 let app_for_fetch = app.clone();
+                let app_for_push = app.clone();
                 let app_for_stage_all = app.clone();
                 let app_for_unstage_all = app.clone();
+                let app_for_view = app.clone();
+                let conflict_rows = self.git_change_rows(
+                    &conflicts,
+                    GitDiffKind::Unstaged,
+                    "git-conflict",
+                    &mut row_index,
+                    theme,
+                    cx,
+                );
+                let unstaged_rows = self.git_change_rows(
+                    &unstaged,
+                    GitDiffKind::Unstaged,
+                    "git-unstaged",
+                    &mut row_index,
+                    theme,
+                    cx,
+                );
+                let staged_rows = self.git_change_rows(
+                    &staged,
+                    GitDiffKind::Staged,
+                    "git-staged",
+                    &mut row_index,
+                    theme,
+                    cx,
+                );
 
                 let mut list = div()
                     .size_full()
@@ -3947,6 +4525,47 @@ impl DevHubLite {
                                 )
                             })
                             .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(9.0))
+                                    .child(
+                                        div()
+                                            .text_color(theme.success)
+                                            .child(format!("+{total_additions}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme.error)
+                                            .child(format!("-{total_deletions}")),
+                                    ),
+                            )
+                            .child(
+                                Button::new("git-change-view")
+                                    .icon(if self.git_tree_view {
+                                        IconName::File
+                                    } else {
+                                        IconName::FolderClosed
+                                    })
+                                    .tooltip(if self.git_tree_view {
+                                        "View changes as flat list"
+                                    } else {
+                                        "View changes as tree"
+                                    })
+                                    .xsmall()
+                                    .compact()
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        app_for_view.update(cx, |this, cx| {
+                                            this.git_tree_view = !this.git_tree_view;
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .child(
                                 Button::new("git-fetch")
                                     .icon(IconName::ArrowDown)
                                     .tooltip("Fetch remotes")
@@ -3961,16 +4580,23 @@ impl DevHubLite {
                                     }),
                             )
                             .child(
-                                Button::new("git-refresh")
-                                    .icon(IconName::Redo2)
-                                    .tooltip("Refresh Git status")
+                                Button::new("git-push")
+                                    .icon(IconName::ArrowUp)
+                                    .tooltip(if set_upstream {
+                                        "Set upstream and push current branch"
+                                    } else {
+                                        "Push current branch"
+                                    })
                                     .xsmall()
                                     .compact()
                                     .ghost()
-                                    .disabled(operation_running)
+                                    .disabled(operation_running || !push_enabled)
                                     .on_click(move |_, _, cx| {
-                                        app_for_refresh.update(cx, |this, cx| {
-                                            this.load_git_status(cx);
+                                        app_for_push.update(cx, |this, cx| {
+                                            this.run_git_action(
+                                                GitAction::Push { set_upstream },
+                                                cx,
+                                            );
                                         });
                                     }),
                             ),
@@ -3995,17 +4621,7 @@ impl DevHubLite {
                                             .text_color(theme.error)
                                             .child(format!("CONFLICTS  {}", conflicts.len())),
                                     )
-                                    .children(conflicts.iter().map(|change| {
-                                        let index = row_index;
-                                        row_index += 1;
-                                        self.git_change_row(
-                                            change,
-                                            GitDiffKind::Unstaged,
-                                            ("git-conflict", index),
-                                            theme,
-                                            cx,
-                                        )
-                                    }))
+                                    .children(conflict_rows)
                             })
                             .when(!unstaged.is_empty(), |scroll| {
                                 scroll
@@ -4041,17 +4657,7 @@ impl DevHubLite {
                                                     }),
                                             ),
                                     )
-                                    .children(unstaged.iter().map(|change| {
-                                        let index = row_index;
-                                        row_index += 1;
-                                        self.git_change_row(
-                                            change,
-                                            GitDiffKind::Unstaged,
-                                            ("git-unstaged", index),
-                                            theme,
-                                            cx,
-                                        )
-                                    }))
+                                    .children(unstaged_rows)
                             })
                             .when(!staged.is_empty(), |scroll| {
                                 scroll
@@ -4090,17 +4696,7 @@ impl DevHubLite {
                                                     }),
                                             ),
                                     )
-                                    .children(staged.iter().map(|change| {
-                                        let index = row_index;
-                                        row_index += 1;
-                                        self.git_change_row(
-                                            change,
-                                            GitDiffKind::Staged,
-                                            ("git-staged", index),
-                                            theme,
-                                            cx,
-                                        )
-                                    }))
+                                    .children(staged_rows)
                             })
                             .when(status.changes.is_empty(), |scroll| {
                                 scroll.child(workbench_message(
@@ -4119,14 +4715,14 @@ impl DevHubLite {
                     div()
                         .flex_shrink_0()
                         .flex()
-                        .flex_col()
                         .gap_1()
-                        .p_2()
+                        .p_1()
                         .border_t_1()
                         .border_color(theme.border)
                         .child(
                             Input::new(&self.git_commit_input)
-                                .h(px(28.0))
+                                .h(px(46.0))
+                                .flex_1()
                                 .appearance(false)
                                 .border_1()
                                 .border_color(theme.border_strong)
@@ -4134,10 +4730,12 @@ impl DevHubLite {
                         )
                         .child(
                             div()
-                                .h(px(24.0))
+                                .w(px(82.0))
+                                .h(px(46.0))
+                                .flex_shrink_0()
                                 .flex()
-                                .items_center()
-                                .gap_2()
+                                .flex_col()
+                                .gap_1()
                                 .child(
                                     Checkbox::new("git-amend")
                                         .label("Amend")
@@ -4156,6 +4754,7 @@ impl DevHubLite {
                                         .small()
                                         .compact()
                                         .primary()
+                                        .w_full()
                                         .flex_1()
                                         .disabled(!commit_enabled)
                                         .on_click(move |_, _, cx| {
@@ -5213,7 +5812,7 @@ impl Render for DevHubLite {
                                 chrome_button_style
                             })
                             .w(px(24.0))
-                            .h(px(22.0))
+                            .h(px(20.0))
                             .ml_1()
                             .on_click(move |event, window, cx| {
                                 app.update(cx, |this, cx| {
@@ -5226,10 +5825,10 @@ impl Render for DevHubLite {
                         Button::new("project-switcher")
                             .label(selected_project_name)
                             .tooltip("Switch project")
-                            .dropdown_caret(true)
                             .xsmall()
                             .compact()
                             .custom(project_pill_style)
+                            .h(px(20.0))
                             .max_w(px(200.0))
                             .overflow_hidden()
                             .ml_1()
@@ -5242,7 +5841,7 @@ impl Render for DevHubLite {
                     .when_some(titlebar_git_branch, |titlebar, branch| {
                         titlebar.child(
                             div()
-                                .h(px(22.0))
+                                .h(px(20.0))
                                 .max_w(px(170.0))
                                 .ml_1()
                                 .px_2()
@@ -5338,7 +5937,7 @@ impl Render for DevHubLite {
                             .compact()
                             .custom(chrome_button_style)
                             .w(px(24.0))
-                            .h(px(22.0))
+                            .h(px(20.0))
                             .disabled(!has_selected_project)
                             .on_click(move |_, _, cx| {
                                 app.update(cx, |this, cx| {
@@ -5618,14 +6217,299 @@ impl Render for DevHubLite {
                         ),
                 )
                 .into_any()
+        } else if let Some((selection, raw_x, raw_y)) = self.git_context_menu.clone() {
+            let bounds = window.bounds();
+            let win_w: f32 = bounds.size.width.into();
+            let win_h: f32 = bounds.size.height.into();
+            let menu_w = 176.0;
+            let menu_h = if selection.kind == GitDiffKind::Unstaged {
+                82.0
+            } else {
+                58.0
+            };
+            let context_x = ((raw_x + menu_w).min(win_w) - menu_w).max(0.0);
+            let context_y = ((raw_y + menu_h).min(win_h) - menu_h).max(0.0);
+            let entity = cx.entity();
+            let close_entity = entity.clone();
+            let action_entity = entity.clone();
+            let copy_entity = entity.clone();
+            let discard_entity = entity.clone();
+            let discard_change = selection.change.clone();
+            let path = selection.change.path.to_string_lossy().into_owned();
+            let action_label = match selection.kind {
+                GitDiffKind::Unstaged => "Stage",
+                GitDiffKind::Staged => "Unstage",
+            };
+            let action_kind = selection.kind;
+            let action_path = selection.change.path.clone();
+
+            div()
+                .relative()
+                .size_full()
+                .child(app)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            close_entity.update(cx, |this, cx| {
+                                this.git_context_menu = None;
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(context_x))
+                                .top(px(context_y))
+                                .w(px(menu_w))
+                                .bg(theme.surface_background)
+                                .border_1()
+                                .border_color(theme.border)
+                                .rounded_sm()
+                                .py_1()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(git_context_menu_item(action_label, theme).on_mouse_down(
+                                    MouseButton::Left,
+                                    move |_, _, cx| {
+                                        let action = match action_kind {
+                                            GitDiffKind::Unstaged => {
+                                                GitAction::Stage(vec![action_path.clone()])
+                                            }
+                                            GitDiffKind::Staged => {
+                                                GitAction::Unstage(vec![action_path.clone()])
+                                            }
+                                        };
+                                        action_entity.update(cx, |this, cx| {
+                                            this.run_git_action(action, cx);
+                                        });
+                                    },
+                                ))
+                                .when(selection.kind == GitDiffKind::Unstaged, |menu| {
+                                    menu.child(
+                                        git_context_menu_item("Discard changes", theme)
+                                            .text_color(theme.error)
+                                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                                let change = discard_change.clone();
+                                                discard_entity.update(cx, |this, cx| {
+                                                    this.git_context_menu = None;
+                                                    this.git_pending_discard = Some(change);
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    )
+                                })
+                                .child(git_context_menu_item("Copy path", theme).on_mouse_down(
+                                    MouseButton::Left,
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            path.clone(),
+                                        ));
+                                        copy_entity.update(cx, |this, cx| {
+                                            this.git_context_menu = None;
+                                            this.show_copy_feedback("COPIED PATH", cx);
+                                        });
+                                    },
+                                )),
+                        ),
+                )
+                .into_any()
         } else {
             app.into_any()
         }
     }
 }
 
-fn markdown_raw_source(source: &str) -> String {
-    markdown_fenced_source("text", source)
+fn project_locator(project: &Project) -> ProjectLocator {
+    ProjectLocator {
+        path: project.path.clone(),
+        remote_host: project.source.host().map(str::to_string),
+    }
+}
+
+fn project_locator_matches(project: &Project, locator: &ProjectLocator) -> bool {
+    project.path == locator.path && project.source.host() == locator.remote_host.as_deref()
+}
+
+fn git_change_label(change: &GitFileChange) -> String {
+    change.original_path.as_ref().map_or_else(
+        || change.path.to_string_lossy().into_owned(),
+        |original| {
+            format!(
+                "{} -> {}",
+                original.to_string_lossy(),
+                change.path.to_string_lossy()
+            )
+        },
+    )
+}
+
+fn git_tree_entries(changes: &[&GitFileChange], kind: GitDiffKind) -> Vec<GitTreeEntry> {
+    let mut directories = HashSet::new();
+    for change in changes {
+        let mut current = change.path.parent();
+        while let Some(directory) = current.filter(|directory| !directory.as_os_str().is_empty()) {
+            directories.insert(directory.to_path_buf());
+            current = directory.parent();
+        }
+    }
+
+    let mut entries = Vec::new();
+    append_git_tree_entries(Path::new(""), 0, &directories, changes, kind, &mut entries);
+    entries
+}
+
+fn append_git_tree_entries(
+    parent: &Path,
+    depth: usize,
+    directories: &HashSet<PathBuf>,
+    changes: &[&GitFileChange],
+    kind: GitDiffKind,
+    entries: &mut Vec<GitTreeEntry>,
+) {
+    let mut child_directories = directories
+        .iter()
+        .filter(|directory| directory.parent().unwrap_or(Path::new("")) == parent)
+        .collect::<Vec<_>>();
+    child_directories.sort();
+    for directory in child_directories {
+        let label = directory.file_name().map_or_else(
+            || directory.to_string_lossy().into_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        entries.push(GitTreeEntry {
+            path: directory.clone(),
+            label,
+            depth,
+            selection: None,
+        });
+        append_git_tree_entries(directory, depth + 1, directories, changes, kind, entries);
+    }
+
+    let mut child_changes = changes
+        .iter()
+        .filter(|change| change.path.parent().unwrap_or(Path::new("")) == parent)
+        .copied()
+        .collect::<Vec<_>>();
+    child_changes.sort_by(|left, right| left.path.cmp(&right.path));
+    for change in child_changes {
+        let label = change.path.file_name().map_or_else(
+            || change.path.to_string_lossy().into_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let label = change
+            .original_path
+            .as_ref()
+            .map_or(label.clone(), |original| {
+                let original = original.file_name().map_or_else(
+                    || original.to_string_lossy().into_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                format!("{original} -> {label}")
+            });
+        entries.push(GitTreeEntry {
+            path: change.path.clone(),
+            label,
+            depth,
+            selection: Some(GitSelection {
+                change: change.clone(),
+                kind,
+            }),
+        });
+    }
+}
+
+fn git_stat_value(value: Option<usize>) -> String {
+    value.map_or_else(|| "?".into(), |value| value.to_string())
+}
+
+fn git_context_menu_item(label: &'static str, theme: Theme) -> Div {
+    div()
+        .h(px(24.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .text_size(px(11.0))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(move |style| style.bg(theme.surface_hover))
+        .child(label)
+}
+
+fn local_git_directory(project_root: &Path) -> PathBuf {
+    let dot_git = project_root.join(".git");
+    if dot_git.is_dir() {
+        return dot_git;
+    }
+    let Ok(contents) = std::fs::read_to_string(&dot_git) else {
+        return dot_git;
+    };
+    let Some(path) = contents.trim().strip_prefix("gitdir:").map(str::trim) else {
+        return dot_git;
+    };
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_root.join(path)
+    }
+}
+
+fn diff_gutter_number(number: Option<usize>, theme: Theme) -> Div {
+    div()
+        .w(px(38.0))
+        .h_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .pr_2()
+        .border_r_1()
+        .border_color(theme.border.opacity(0.72))
+        .text_color(theme.text_disabled)
+        .child(number.map(|number| number.to_string()).unwrap_or_default())
+}
+
+fn git_watch_event_is_relevant(
+    project_root: &Path,
+    git_directory: &Path,
+    event: &notify::Event,
+) -> bool {
+    event.paths.iter().any(|path| {
+        if let Ok(relative) = path.strip_prefix(project_root) {
+            let mut components = relative.components();
+            let Some(first) = components.next() else {
+                return true;
+            };
+            if first.as_os_str() != std::ffi::OsStr::new(".git") {
+                return true;
+            }
+            return git_metadata_path_is_relevant(components.as_path());
+        }
+        path.strip_prefix(git_directory)
+            .is_ok_and(git_metadata_path_is_relevant)
+    })
+}
+
+fn git_metadata_path_is_relevant(path: &Path) -> bool {
+    let Some(name) = path.components().next() else {
+        return true;
+    };
+    let name = name.as_os_str().to_string_lossy();
+    name.starts_with("index")
+        || matches!(
+            name.as_ref(),
+            "HEAD"
+                | "ORIG_HEAD"
+                | "MERGE_HEAD"
+                | "REBASE_HEAD"
+                | "CHERRY_PICK_HEAD"
+                | "REVERT_HEAD"
+                | "packed-refs"
+                | "refs"
+                | "config"
+                | "commondir"
+        )
 }
 
 fn git_error_notice(error: &GitError) -> String {
@@ -5733,6 +6617,7 @@ pub(crate) fn run() {
             |window, cx| {
                 configure_windows_surface(window);
                 let app = cx.new(|cx| DevHubLite::new(window, cx));
+                app.update(cx, |this, cx| this.restore_last_project(cx));
                 cx.new(|cx| gpui_component::Root::new(app, window, cx))
             },
         )

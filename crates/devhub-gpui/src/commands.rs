@@ -15,6 +15,7 @@ pub enum CommandId {
     DiscardSelectedChange,
     FocusGitCommit,
     FetchGitRemotes,
+    PushGitBranch,
     OpenInZed,
     OpenWith,
     ToggleProjectPin,
@@ -36,7 +37,7 @@ pub struct CommandSpec {
     pub shortcut: Option<&'static str>,
 }
 
-pub const COMMANDS: [CommandSpec; 24] = [
+pub const COMMANDS: [CommandSpec; 25] = [
     CommandSpec {
         id: CommandId::ToggleProjectCatalog,
         title: "Toggle Project Catalog",
@@ -112,6 +113,12 @@ pub const COMMANDS: [CommandSpec; 24] = [
     CommandSpec {
         id: CommandId::FetchGitRemotes,
         title: "Fetch Git Remotes",
+        category: "Git",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::PushGitBranch,
+        title: "Push Current Git Branch",
         category: "Git",
         shortcut: None,
     },

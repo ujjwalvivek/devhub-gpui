@@ -94,6 +94,16 @@ pub struct Config {
 
     #[serde(default)]
     pub hidden_projects: Vec<PathBuf>,
+
+    #[serde(default)]
+    pub last_project: Option<ProjectLocator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectLocator {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub remote_host: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +155,7 @@ impl Default for Config {
             remote_hosts: Vec::new(),
             pinned_projects: Vec::new(),
             hidden_projects: Vec::new(),
+            last_project: None,
         }
     }
 }
@@ -462,6 +473,10 @@ mod tests {
             }],
             pinned_projects: Vec::new(),
             hidden_projects: Vec::new(),
+            last_project: Some(ProjectLocator {
+                path: PathBuf::from("/srv/code/project"),
+                remote_host: Some("dev@example.com".into()),
+            }),
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -474,6 +489,7 @@ mod tests {
         assert_eq!(deserialized.remote_hosts, config.remote_hosts);
         assert_eq!(deserialized.theme, ThemeId::TokyoNightStorm);
         assert_eq!(deserialized.appearance, AppearanceMode::System);
+        assert_eq!(deserialized.last_project, config.last_project);
     }
 
     #[test]
@@ -486,6 +502,7 @@ mod tests {
         assert!(config.remote_hosts.is_empty());
         assert_eq!(config.theme, ThemeId::MonochromeZero);
         assert_eq!(config.appearance, AppearanceMode::Dark);
+        assert!(config.last_project.is_none());
     }
 
     #[test]

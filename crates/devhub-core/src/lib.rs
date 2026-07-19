@@ -13,16 +13,19 @@ pub use cache::{
     save_projects_with_diagnostics,
 };
 pub use cancellation::{CancellationToken, OPERATION_CANCELLED};
-pub use config::{normalize_ssh_host, AppearanceMode, Config, RemoteHostConfig, ThemeId};
+pub use config::{
+    normalize_ssh_host, AppearanceMode, Config, ProjectLocator, RemoteHostConfig, ThemeId,
+};
 pub use discovery::{
     scan_directories, scan_directories_cancellable, sort_projects, Project, ProjectSource,
     ProjectType,
 };
 pub use git::{
     git_commit_cancellable, git_diff_cancellable, git_discard_cancellable, git_fetch_cancellable,
-    git_stage_all_cancellable, git_stage_cancellable, git_status, git_status_cancellable,
-    git_unstage_all_cancellable, git_unstage_cancellable, GitDiffKind, GitError, GitErrorKind,
-    GitFileChange, GitOperationResult, GitStatus,
+    git_push_cancellable, git_stage_all_cancellable, git_stage_cancellable, git_status,
+    git_status_cancellable, git_status_summary_cancellable, git_unstage_all_cancellable,
+    git_unstage_cancellable, GitDiffKind, GitError, GitErrorKind, GitFileChange, GitLineStats,
+    GitOperationResult, GitStatus,
 };
 pub use persistence::{
     PersistenceEvent, PersistenceFailure, PersistenceOperation, PersistenceRecoverySource,

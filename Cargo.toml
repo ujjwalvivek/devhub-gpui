@@ -9,6 +9,7 @@ gpui = "0.2.2"
 gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
 gpui-component-assets = "0.5.1"
 ignore = "0.4"
+notify = "7.0.0"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

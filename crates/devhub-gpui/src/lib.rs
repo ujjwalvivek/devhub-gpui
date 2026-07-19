@@ -84,21 +84,6 @@ mod text_support {
         }
     }
 
-    pub fn markdown_fenced_source(language: &str, source: &str) -> String {
-        let mut longest = 0;
-        let mut current = 0;
-        for character in source.chars() {
-            if character == '`' {
-                current += 1;
-                longest = longest.max(current);
-            } else {
-                current = 0;
-            }
-        }
-        let fence = "`".repeat((longest + 1).max(3));
-        format!("{fence}{language}\n{source}\n{fence}")
-    }
-
     pub fn omit_markdown_images(source: &str) -> String {
         let mut output = String::with_capacity(source.len());
         let mut fence: Option<(char, usize)> = None;
@@ -226,13 +211,6 @@ mod text_support {
         use super::*;
 
         #[test]
-        fn fenced_source_outgrows_backticks_in_content() {
-            let fenced = markdown_fenced_source("rust", "```nested```");
-            assert!(fenced.starts_with("````rust\n"));
-            assert!(fenced.ends_with("\n````"));
-        }
-
-        #[test]
         fn markdown_and_html_images_become_offline_placeholders() {
             let source = "![badge](https://example.com/badge.svg)\n<IMG src=\"demo.gif\" alt=\"Demo animation\">\n![logo](assets/logo.png)";
             let omitted = omit_markdown_images(source);
@@ -261,8 +239,129 @@ mod text_support {
 }
 
 pub use scan::{next_selection, previous_selection, ScanModel, ScanState};
-pub use text_support::{language_for_path, markdown_fenced_source, omit_markdown_images};
+pub use text_support::{language_for_path, omit_markdown_images};
 pub use theme::{Theme, MONO_FONT, UI_FONT};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffLineKind {
+    FileHeader,
+    HunkHeader,
+    Addition,
+    Deletion,
+    Context,
+    Metadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffLine {
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+    pub kind: DiffLineKind,
+    pub text: String,
+}
+
+pub fn parse_unified_diff(source: &str, limit: usize) -> (Vec<DiffLine>, bool) {
+    let mut lines = Vec::new();
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+    let mut in_hunk = false;
+    let mut truncated = false;
+
+    for line in source.lines() {
+        if lines.len() == limit {
+            truncated = true;
+            break;
+        }
+
+        if let Some((old_start, new_start)) = parse_hunk_starts(line) {
+            old_line = old_start;
+            new_line = new_start;
+            in_hunk = true;
+            lines.push(DiffLine {
+                old_line: None,
+                new_line: None,
+                kind: DiffLineKind::HunkHeader,
+                text: line.to_string(),
+            });
+            continue;
+        }
+
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        }
+
+        let (kind, old_number, new_number) = if in_hunk {
+            if line.starts_with('+') {
+                let number = (new_line > 0).then_some(new_line);
+                new_line = new_line.saturating_add(1);
+                (DiffLineKind::Addition, None, number)
+            } else if line.starts_with('-') {
+                let number = (old_line > 0).then_some(old_line);
+                old_line = old_line.saturating_add(1);
+                (DiffLineKind::Deletion, number, None)
+            } else if line.starts_with(' ') {
+                let old_number = (old_line > 0).then_some(old_line);
+                let new_number = (new_line > 0).then_some(new_line);
+                old_line = old_line.saturating_add(1);
+                new_line = new_line.saturating_add(1);
+                (DiffLineKind::Context, old_number, new_number)
+            } else {
+                (DiffLineKind::Metadata, None, None)
+            }
+        } else if line.starts_with("diff --git ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+        {
+            (DiffLineKind::FileHeader, None, None)
+        } else {
+            (DiffLineKind::Metadata, None, None)
+        };
+        lines.push(DiffLine {
+            old_line: old_number,
+            new_line: new_number,
+            kind,
+            text: line.to_string(),
+        });
+    }
+
+    (lines, truncated)
+}
+
+fn parse_hunk_starts(line: &str) -> Option<(usize, usize)> {
+    let ranges = line.strip_prefix("@@ -")?.split_once(" @@")?.0;
+    let (old, new) = ranges.split_once(" +")?;
+    let old = old.split(',').next()?.parse().ok()?;
+    let new = new.split(',').next()?.parse().ok()?;
+    Some((old, new))
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::{parse_unified_diff, DiffLineKind};
+
+    #[test]
+    fn unified_diff_lines_keep_old_and_new_gutters() {
+        let source = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -2,2 +2,3 @@\n same\n-old\n+new\n+more\n";
+        let (lines, truncated) = parse_unified_diff(source, 100);
+
+        assert!(!truncated);
+        assert_eq!(lines[3].kind, DiffLineKind::HunkHeader);
+        assert_eq!((lines[4].old_line, lines[4].new_line), (Some(2), Some(2)));
+        assert_eq!(lines[5].kind, DiffLineKind::Deletion);
+        assert_eq!((lines[5].old_line, lines[5].new_line), (Some(3), None));
+        assert_eq!(lines[6].kind, DiffLineKind::Addition);
+        assert_eq!((lines[6].old_line, lines[6].new_line), (None, Some(3)));
+        assert_eq!((lines[7].old_line, lines[7].new_line), (None, Some(4)));
+    }
+
+    #[test]
+    fn unified_diff_rendering_is_bounded() {
+        let source = "@@ -1,4 +1,4 @@\n one\n-two\n+three\n four\n";
+        let (lines, truncated) = parse_unified_diff(source, 3);
+        assert_eq!(lines.len(), 3);
+        assert!(truncated);
+    }
+}
 
 #[cfg(test)]
 mod startup_tests {

@@ -505,8 +505,13 @@ mod tests {
         let _ = fake_ssh_path();
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
+        let marker = pid_marker("cancel-stdin");
+        let _ = std::fs::remove_file(&marker);
         let cancel_worker = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(75));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !marker.is_file() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
             trigger.cancel();
         });
 
@@ -713,19 +718,33 @@ mod tests {
         cancellation: &CancellationToken,
         label: &str,
     ) -> (Result<SshOutput, SshRunError>, u32) {
-        let marker = test_support_directory().join(format!("{label}-{}.pid", std::process::id()));
+        let marker = pid_marker(label);
         let _ = std::fs::remove_file(&marker);
         let mut command = Command::new(fake_ssh_path());
         command.args(args);
         command.env("DEVHUB_FAKE_SSH_PID_FILE", &marker);
         let result =
             SshRunner::new("fake-host", timeout, output_limit, cancellation).run(command, input);
-        let pid = std::fs::read_to_string(&marker)
-            .unwrap_or_else(|error| panic!("reading {}: {error}", marker.display()))
-            .parse()
-            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Ok(contents) = std::fs::read_to_string(&marker) {
+                if let Ok(pid) = contents.trim().parse() {
+                    break pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PID marker {} was not populated",
+                marker.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let _ = std::fs::remove_file(marker);
         (result, pid)
+    }
+
+    fn pid_marker(label: &str) -> PathBuf {
+        test_support_directory().join(format!("{label}-{}.pid", std::process::id()))
     }
 
     fn assert_process_reaped(pid: u32) {

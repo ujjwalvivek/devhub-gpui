@@ -1282,6 +1282,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "notify",
  "raw-window-handle",
  "resvg",
  "windows 0.61.3",
