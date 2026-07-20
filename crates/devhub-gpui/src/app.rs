@@ -216,6 +216,7 @@ enum LauncherMode {
     Commands,
     Projects,
     Themes,
+    Commit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1551,6 +1552,7 @@ impl DevHubLite {
                     selection.is_active(self.config.theme, self.config.appearance)
                 })
                 .unwrap_or_default(),
+            LauncherMode::Commit => 0,
         };
         self.launcher_scroll.scroll_to_item(self.launcher_selected);
         cx.notify();
@@ -1574,6 +1576,7 @@ impl DevHubLite {
             Some(LauncherMode::Commands) => self.launcher_commands().len(),
             Some(LauncherMode::Projects) => self.launcher_project_indices().len(),
             Some(LauncherMode::Themes) => filtered_themes(&self.launcher_query).len(),
+            Some(LauncherMode::Commit) => 0,
             None => 0,
         }
     }
@@ -1651,7 +1654,7 @@ impl DevHubLite {
                 }
                 self.close_launcher(window, cx);
             }
-            None => {}
+            Some(LauncherMode::Commit) | None => {}
         }
     }
 
@@ -4981,55 +4984,92 @@ impl DevHubLite {
                     div()
                         .flex_shrink_0()
                         .flex()
-                        .gap_1()
-                        .p_1()
+                        .flex_col()
                         .border_t_1()
                         .border_color(theme.border)
-                        .child(
-                            Input::new(&self.git_commit_input)
-                                .h(px(46.0))
-                                .flex_1()
-                                .appearance(false)
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .px_2(),
-                        )
-                        .child(
+                        .bg(theme.panel_background)
+                        .child({
+                            let app_for_expand = app.clone();
                             div()
-                                .w(px(82.0))
-                                .h(px(46.0))
-                                .flex_shrink_0()
                                 .flex()
                                 .flex_col()
-                                .gap_1()
                                 .child(
-                                    Checkbox::new("git-amend")
-                                        .label("Amend")
-                                        .checked(self.git_amend)
-                                        .small()
-                                        .on_click(move |checked, _, cx| {
-                                            app_for_amend.update(cx, |this, cx| {
-                                                this.git_amend = *checked;
-                                                cx.notify();
-                                            });
-                                        }),
+                                    div()
+                                        .relative()
+                                        .child(
+                                            Input::new(&self.git_commit_input)
+                                                .h(px(90.0))
+                                                .w_full()
+                                                .appearance(false)
+                                                .focus_bordered(false)
+                                                .bg(theme.panel_background)
+                                                .font_family(MONO_FONT)
+                                                .text_size(px(11.0))
+                                                .pl_3()
+                                                .pt_2()
+                                                .pr(px(32.0)),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(4.0))
+                                                .right(px(4.0))
+                                                .child(
+                                                    Button::new("expand-commit")
+                                                        .icon(IconName::Maximize)
+                                                        .xsmall()
+                                                        .compact()
+                                                        .ghost()
+                                                        .on_click(move |_, window, cx| {
+                                                            app_for_expand.update(cx, |this, cx| {
+                                                                this.open_launcher(LauncherMode::Commit, window, cx);
+                                                            });
+                                                        })
+                                                )
+                                        )
                                 )
                                 .child(
-                                    Button::new("git-commit")
-                                        .label(if self.git_amend { "Amend" } else { "Commit" })
-                                        .small()
-                                        .compact()
-                                        .primary()
-                                        .w_full()
-                                        .flex_1()
-                                        .disabled(!commit_enabled)
-                                        .on_click(move |_, _, cx| {
-                                            app_for_commit.update(cx, |this, cx| {
-                                                this.commit_git(cx);
-                                            });
-                                        }),
-                                ),
-                        ),
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .items_center()
+                                        .gap_3()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(
+                                            Checkbox::new("git-amend")
+                                                .label("Amend")
+                                                .checked(self.git_amend)
+                                                .small()
+                                                .on_click(move |checked, _, cx| {
+                                                    app_for_amend.update(cx, |this, cx| {
+                                                        this.git_amend = *checked;
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        )
+                                        .child({
+                                            let commit_btn_style = ButtonCustomVariant::new(cx)
+                                                .color(theme.surface_background)
+                                                .foreground(if commit_enabled { theme.text } else { theme.text_disabled })
+                                                .hover(theme.surface_hover)
+                                                .active(theme.surface_selected)
+                                                .border(theme.border);
+                                            Button::new("git-commit")
+                                                .label("Commit")
+                                                .small()
+                                                .compact()
+                                                .custom(commit_btn_style)
+                                                .rounded(px(2.0))
+                                                .disabled(!commit_enabled)
+                                                .on_click(move |_, _, cx| {
+                                                    app_for_commit.update(cx, |this, cx| {
+                                                        this.commit_git(cx);
+                                                    });
+                                                })
+                                        })
+                                )
+                        })
                 );
                 list.into_any_element()
             }
@@ -5840,6 +5880,7 @@ impl DevHubLite {
             LauncherMode::Commands => "Commands",
             LauncherMode::Projects => "Projects",
             LauncherMode::Themes => "Themes",
+            LauncherMode::Commit => "Commit Message",
         };
         let app_for_close = app.clone();
         let app_for_backdrop = app.clone();
@@ -6089,6 +6130,7 @@ impl DevHubLite {
                         .into_any_element()
                 })
                 .collect::<Vec<_>>(),
+            LauncherMode::Commit => vec![],
         };
 
         div()
@@ -6112,13 +6154,14 @@ impl DevHubLite {
                     .key_context("DevHubLauncher")
                     .top(px(TITLEBAR_HEIGHT + 4.0))
                     .left(px(36.0))
-                    .w(match mode {
-                        LauncherMode::Branches => px(350.0),
-                        LauncherMode::Commands => px(350.0),
-                        LauncherMode::Projects => px(350.0),
-                        LauncherMode::Themes => px(350.0),
+                    .w(px(350.0))
+                    .map(|el| {
+                        if mode == LauncherMode::Commit {
+                            el.h(px(250.0))
+                        } else {
+                            el.max_h(px(310.0))
+                        }
                     })
-                    .max_h(px(310.0))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -6127,55 +6170,122 @@ impl DevHubLite {
                     .rounded_sm()
                     .bg(theme.surface_background)
                     .occlude()
-                    .child(
-                        div()
-                            .h(px(30.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_1()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(
-                                Input::new(&self.launcher_input)
-                                    .min_w_0()
-                                    .flex_1()
-                                    .appearance(false),
-                            )
-                            .child(
-                                div()
+                    .children(if mode == LauncherMode::Commit {
+                        let commit_enabled = matches!(&self.git_status_state, LoadState::Loaded(status) if status.staged_count() > 0 || self.git_amend)
+                            && !self.git_commit_message.trim().is_empty()
+                            && self.git_operation_cancellation.is_none();
+                        
+                        let app_for_amend = app.clone();
+                        let app_for_commit = app.clone();
+                        
+                        let commit_btn_style = ButtonCustomVariant::new(cx)
+                            .color(theme.panel_background)
+                            .foreground(if commit_enabled { theme.text } else { theme.text_disabled })
+                            .hover(theme.surface_hover)
+                            .active(theme.surface_selected)
+                            .border(theme.border);
+
+                        vec![
+                            div().flex_1().child(
+                                Input::new(&self.git_commit_input)
+                                    .size_full()
+                                    .appearance(false)
+                                    .focus_bordered(false)
+                                    .bg(theme.surface_background)
+                                    .border_color(theme.surface_background)
+                                    .rounded_none()
                                     .font_family(MONO_FONT)
-                                    .text_size(px(9.0))
-                                    .text_color(theme.text_disabled)
-                                    .child(title),
-                            )
-                            .child(
-                                Button::new("close-launcher")
-                                    .icon(IconName::Close)
-                                    .tooltip("Close")
-                                    .xsmall()
-                                    .compact()
-                                    .ghost()
-                                    .on_click(move |_, window, cx| {
-                                        app_for_close.update(cx, |this, cx| {
-                                            this.close_launcher(window, cx);
-                                        });
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("launcher-list")
-                            .min_h_0()
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.launcher_scroll)
-                            .when(rows.is_empty(), |list| {
-                                list.child(workbench_message(empty_message, empty_color))
-                            })
-                            .children(rows),
-                    ),
+                                    .text_size(px(12.0))
+                                    .p_3()
+                            ).into_any_element(),
+                            div()
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_3()
+                                .px_3()
+                                .pb_2()
+                                .child(
+                                    Checkbox::new("git-amend-modal")
+                                        .label("Amend")
+                                        .checked(self.git_amend)
+                                        .small()
+                                        .on_click(move |checked, _, cx| {
+                                            app_for_amend.update(cx, |this, cx| {
+                                                this.git_amend = *checked;
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new("git-commit-modal")
+                                        .label("Commit")
+                                        .small()
+                                        .compact()
+                                        .custom(commit_btn_style)
+                                        .rounded(px(2.0))
+                                        .disabled(!commit_enabled)
+                                        .on_click(move |_, window, cx| {
+                                            app_for_commit.update(cx, |this, cx| {
+                                                this.commit_git(cx);
+                                                this.close_launcher(window, cx);
+                                            });
+                                        }),
+                                )
+                                .into_any_element()
+                        ]
+                    } else {
+                        vec![
+                            div()
+                                .h(px(30.0))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_1()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .child(
+                                    Input::new(&self.launcher_input)
+                                        .min_w_0()
+                                        .flex_1()
+                                        .appearance(false),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(9.0))
+                                        .text_color(theme.text_disabled)
+                                        .child(title),
+                                )
+                                .child(
+                                    Button::new("close-launcher")
+                                        .icon(IconName::Close)
+                                        .tooltip("Close")
+                                        .xsmall()
+                                        .compact()
+                                        .ghost()
+                                        .on_click(move |_, window, cx| {
+                                            app_for_close.update(cx, |this, cx| {
+                                                this.close_launcher(window, cx);
+                                            });
+                                        }),
+                                )
+                                .into_any_element(),
+                            div()
+                                .id("launcher-list")
+                                .min_h_0()
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.launcher_scroll)
+                                .when(rows.is_empty(), |list| {
+                                    list.child(workbench_message(empty_message, empty_color))
+                                })
+                                .children(rows)
+                                .into_any_element()
+                        ]
+                    }),
             )
             .into_any_element()
     }
@@ -6241,8 +6351,8 @@ impl Render for DevHubLite {
         component_theme.list_active = theme.surface_selected;
         component_theme.list_active_border = theme.border_strong;
         component_theme.scrollbar = theme.panel_background;
-        component_theme.scrollbar_thumb = theme.border_strong;
-        component_theme.scrollbar_thumb_hover = theme.text_disabled;
+        component_theme.scrollbar_thumb = theme.panel_background;
+        component_theme.scrollbar_thumb_hover = theme.panel_background;
         component_theme.danger = theme.error;
         component_theme.danger_foreground = theme.text;
         let highlight_theme = Arc::make_mut(&mut component_theme.highlight_theme);
@@ -7329,8 +7439,8 @@ pub(crate) fn run() {
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let component_theme = gpui_component::Theme::global_mut(cx);
-        component_theme.radius = px(1.0);
-        component_theme.radius_lg = px(1.0);
+        component_theme.radius = px(2.0);
+        component_theme.radius_lg = px(2.0);
         component_theme.font_family = UI_FONT.into();
         component_theme.mono_font_family = MONO_FONT.into();
         cx.bind_keys([
