@@ -595,7 +595,7 @@ fn project_type_from_label(label: &str) -> ProjectType {
     }
 }
 
-pub(crate) fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

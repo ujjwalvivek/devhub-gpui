@@ -36,8 +36,8 @@ pub use persistence::{
 pub use remote::{
     check_ssh_connection, check_ssh_connection_cancellable, list_remote_subdirs,
     list_remote_subdirs_cancellable, open_project_in_zed, scan_remote_host,
-    scan_remote_host_cancellable, validate_remote_path, validate_ssh_host, zed_ssh_uri,
-    DirectoryEntry,
+    scan_remote_host_cancellable, shell_quote, validate_remote_path, validate_ssh_host,
+    zed_ssh_uri, DirectoryEntry,
 };
 pub use workspace::{
     list_local_subdirs, list_project_tree, list_project_tree_cancellable, list_tree,

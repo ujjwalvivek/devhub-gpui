@@ -2,11 +2,13 @@ mod commands;
 mod diagnostics;
 mod scan;
 mod shell;
+mod terminal;
 mod theme;
 
 pub use commands::{filtered_commands, filtered_themes, CommandId, CommandSpec, ThemeSelection};
 pub use diagnostics::{persistence_status_text, PersistenceHistory};
 pub use shell::{visible_project_row, Activity};
+pub use terminal::{TerminalLaunch, TerminalPanel};
 
 use std::path::PathBuf;
 
@@ -240,7 +242,7 @@ mod text_support {
 
 pub use scan::{next_selection, previous_selection, ScanModel, ScanState};
 pub use text_support::{language_for_path, omit_markdown_images};
-pub use theme::{Theme, MONO_FONT, UI_FONT};
+pub use theme::{Theme, MONO_FONT, TERMINAL_FONT, UI_FONT};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffLineKind {

@@ -28,7 +28,8 @@ use devhub_gpui::{
     language_for_path, next_selection, omit_markdown_images, parse_unified_diff,
     partition_local_scan_roots, persistence_status_text, previous_selection, scan_sources_changed,
     should_show_ftue, visible_project_row, Activity, CommandId, CommandSpec, DiffLineKind,
-    PersistenceHistory, ScanModel, ScanState, Theme, MONO_FONT, UI_FONT,
+    PersistenceHistory, ScanModel, ScanState, TerminalLaunch, TerminalPanel, Theme, MONO_FONT,
+    TERMINAL_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -47,6 +48,7 @@ use std::time::Duration;
 const TITLEBAR_HEIGHT: f32 = 28.0;
 const PROJECT_ROW_HEIGHT: f32 = 30.0;
 const STATUSBAR_HEIGHT: f32 = 22.0;
+const MIN_TERMINAL_HEIGHT: f32 = 120.0;
 const GIT_WATCH_TICK: Duration = Duration::from_millis(100);
 const GIT_WATCH_QUIET_TICKS: usize = 2;
 const GIT_REMOTE_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
@@ -99,7 +101,8 @@ actions!(
         ShowHistory,
         ToggleContextPane,
         DismissLauncher,
-        AcceptLauncher
+        AcceptLauncher,
+        ToggleTerminal,
     ]
 );
 
@@ -107,7 +110,7 @@ struct DevHubLite {
     window_handle: AnyWindowHandle,
     scan: ScanModel,
     scan_cancellation: Option<CancellationToken>,
-    selected: Option<usize>, // Stable index into scan.projects, never a filtered row.
+    selected: Option<usize>,
     missing_project: Option<ProjectLocator>,
     filter_query: String,
     launch_error: Option<String>,
@@ -133,6 +136,9 @@ struct DevHubLite {
     remote_path_input: Entity<InputState>,
     activity: Activity,
     project_catalog_open: bool,
+    terminal_visible: bool,
+    terminal_entity: Option<Entity<TerminalPanel>>,
+    terminal_owner: Option<ProjectLocator>,
     context_pane_visible: bool,
     tree_state: LoadState<TreeListing>,
     tree_generation: u64,
@@ -199,6 +205,7 @@ struct DevHubLite {
 
     context_width_px: f32,
     project_catalog_width_px: f32,
+    terminal_height_px: f32,
     resize_target: Option<ResizeTarget>,
     context_menu: Option<(usize, f32, f32)>,
 }
@@ -223,6 +230,7 @@ enum LauncherMode {
 enum ResizeTarget {
     WorkspaceContext,
     ProjectCatalog,
+    Terminal,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -380,6 +388,9 @@ impl DevHubLite {
             remote_path_input,
             activity: Activity::Overview,
             project_catalog_open: false,
+            terminal_visible: false,
+            terminal_entity: None,
+            terminal_owner: None,
             context_pane_visible: true,
             tree_state: LoadState::Idle,
             tree_generation: 0,
@@ -446,6 +457,7 @@ impl DevHubLite {
 
             context_width_px: 210.0,
             project_catalog_width_px: 276.0,
+            terminal_height_px: 200.0,
             resize_target: None,
             context_menu: None,
         }
@@ -571,17 +583,18 @@ impl DevHubLite {
             {
                 let project = &self.scan.projects[index];
                 if self.is_hidden(project) {
-                    // Hidden projects do not take over the workspace on startup.
                 } else if project.source.is_remote() || project.path.is_dir() {
                     self.set_selected(index, cx);
                     return;
                 } else {
                     self.missing_project = Some(locator);
+                    self.end_terminal_session();
                     self.reset_workspace(cx);
                     return;
                 }
             } else {
                 self.missing_project = Some(locator);
+                self.end_terminal_session();
                 self.reset_workspace(cx);
                 return;
             }
@@ -595,6 +608,7 @@ impl DevHubLite {
         {
             self.set_selected(index, cx);
         } else {
+            self.end_terminal_session();
             self.reset_workspace(cx);
         }
     }
@@ -655,6 +669,9 @@ impl DevHubLite {
         }
         self.save_config();
         self.context_menu = None;
+        if self.selected == Some(project_index) {
+            self.end_terminal_session();
+        }
         self.selected = None;
         self.reset_workspace(cx);
         cx.notify();
@@ -767,6 +784,10 @@ impl DevHubLite {
             return;
         }
         let project = self.scan.projects[project_index].clone();
+        let owner = project_locator(&project);
+        if self.terminal_owner.as_ref() != Some(&owner) {
+            self.end_terminal_session();
+        }
         self.selected = Some(project_index);
         self.missing_project = None;
         self.remember_project(&project);
@@ -1741,6 +1762,7 @@ impl DevHubLite {
             }
             CommandId::SelectTheme => self.open_launcher(LauncherMode::Themes, window, cx),
             CommandId::ShowSettings => self.open_settings(window, cx),
+            CommandId::ToggleTerminal => self.toggle_terminal(window, cx),
         }
     }
 
@@ -1852,6 +1874,7 @@ impl DevHubLite {
             self.set_selected(project_index, cx);
             self.project_scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
+            self.end_terminal_session();
             self.selected = None;
             self.reset_workspace(cx);
         }
@@ -3202,6 +3225,82 @@ impl DevHubLite {
         } else {
             window.focus(&self.focus_handle);
         }
+        cx.notify();
+    }
+
+    fn end_terminal_session(&mut self) {
+        self.terminal_entity = None;
+        self.terminal_owner = None;
+        self.terminal_visible = false;
+    }
+
+    fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        let launch = match TerminalLaunch::for_project(&project) {
+            Ok(launch) => launch,
+            Err(error) => {
+                self.launch_error = Some(format!("Terminal: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let owner = project_locator(&project);
+        let (cols, rows) = terminal_grid_size(window, self.terminal_height_px);
+        let theme = Theme::for_preferences(
+            self.config.theme,
+            self.config.appearance,
+            window.appearance(),
+        );
+        let entity = cx.new(|cx| {
+            TerminalPanel::new(
+                cx,
+                launch,
+                cols,
+                rows,
+                theme.text,
+                theme.app_background,
+            )
+        });
+        entity.read(cx).focus(window);
+        self.terminal_entity = Some(entity);
+        self.terminal_owner = Some(owner);
+        self.terminal_visible = true;
+    }
+
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project() else {
+            return;
+        };
+        let owner = project_locator(project);
+        let session_matches = self.terminal_owner.as_ref() == Some(&owner);
+        let session_running = session_matches
+            && self
+                .terminal_entity
+                .as_ref()
+                .is_some_and(|entity| entity.read(cx).is_running());
+
+        if !session_running {
+            self.end_terminal_session();
+            self.spawn_terminal(window, cx);
+        } else if self.terminal_visible {
+            self.terminal_visible = false;
+            window.focus(&self.focus_handle);
+        } else {
+            self.terminal_visible = true;
+            if let Some(entity) = self.terminal_entity.as_ref() {
+                entity.read(cx).focus(window);
+            }
+        }
+        self.resize_target = None;
+        cx.notify();
+    }
+
+    fn collapse_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_visible = false;
+        self.resize_target = None;
+        window.focus(&self.focus_handle);
         cx.notify();
     }
 
@@ -5539,7 +5638,7 @@ impl DevHubLite {
                             .flex_col()
                             .children(commit.files.iter().map(|file| {
                                 let parts: Vec<&str> = file.splitn(3, '\t').collect();
-                                let additions: usize = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                                let additions: usize = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                                 let deletions: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                                 let path = parts.get(2).unwrap_or(&"").to_string();
                                 div()
@@ -6289,6 +6388,99 @@ impl DevHubLite {
             )
             .into_any_element()
     }
+
+    fn terminal_panel(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.terminal_visible {
+            return None;
+        }
+        let dragging = self.resize_target == Some(ResizeTarget::Terminal);
+        let entity = self.terminal_entity.as_ref()?;
+        let shell = entity.read(cx).shell.clone();
+        let cwd = entity.read(cx).cwd_label.clone();
+
+        Some(
+            div()
+                .h(px(self.terminal_height_px))
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("terminal-resize-handle")
+                        .h(px(4.0))
+                        .w_full()
+                        .flex_shrink_0()
+                        .bg(if dragging { theme.focus } else { theme.border })
+                        .hover(move |style| style.bg(theme.focus))
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                                this.resize_target = Some(ResizeTarget::Terminal);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child({
+                    let shell_clone = shell.clone();
+                    let cwd_clone = cwd.clone();
+                    div()
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .bg(theme.titlebar_background)
+                        .child(
+                            div()
+                                .font_family(TERMINAL_FONT)
+                                .text_size(px(10.0))
+                                .text_color(theme.text_muted)
+                                .child(shell_clone),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .font_family(TERMINAL_FONT)
+                                .text_size(px(10.0))
+                                .text_color(theme.text_muted)
+                                .child(cwd_clone),
+                        )
+                        .child({
+                            let app = cx.entity();
+                            Button::new("collapse-terminal")
+                                .icon(IconName::ChevronDown)
+                                .tooltip("Collapse terminal")
+                                .xsmall()
+                                .compact()
+                                .ghost()
+                                .on_click(move |_, window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.collapse_terminal(window, cx);
+                                    });
+                                })
+                        })
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .bg(theme.sidebar_background)
+                        .child(entity.clone()),
+                )
+                .into_any_element(),
+        )
+    }
 }
 
 impl Focusable for DevHubLite {
@@ -6313,6 +6505,10 @@ impl Render for DevHubLite {
             },
             window.appearance(),
         );
+        if let Some(entity) = self.terminal_entity.as_ref() {
+            let (cols, rows) = terminal_grid_size(window, self.terminal_height_px);
+            entity.update(cx, |terminal, _| terminal.resize(cols, rows));
+        }
         if gpui_component::Theme::global(cx).is_dark() == theme.is_light {
             let mode = if theme.is_light {
                 gpui_component::ThemeMode::Light
@@ -6914,6 +7110,7 @@ impl Render for DevHubLite {
                             .into_any()
                     }),
             )
+            .when_some(self.terminal_panel(theme, cx), |app, terminal| app.child(terminal))
             .child(
                 div()
                     .h(px(STATUSBAR_HEIGHT))
@@ -7000,7 +7197,26 @@ impl Render for DevHubLite {
                                         .child(scan_status)
                                 },
                             )),
-                    ),
+                    )
+                    .child({
+                        let app = cx.entity();
+                        let style = if self.terminal_entity.is_some() {
+                            active_chrome_button_style
+                        } else {
+                            chrome_button_style
+                        };
+                        Button::new("toggle-terminal")
+                            .icon(IconName::SquareTerminal)
+                            .tooltip("Toggle Terminal (Ctrl+`)")
+                            .xsmall()
+                            .compact()
+                            .custom(style)
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.toggle_terminal(window, cx);
+                                });
+                            })
+                    }),
             )
             .when_some(project_catalog_panel, |app, catalog| app.child(catalog))
             .when_some(launcher_panel, |app, launcher| app.child(launcher));
@@ -7186,10 +7402,49 @@ impl Render for DevHubLite {
                         ),
                 )
                 .into_any()
+        } else if self.resize_target == Some(ResizeTarget::Terminal) {
+            div()
+                .relative()
+                .size_full()
+                .child(app)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                            let bounds = window.bounds();
+                            let win_h: f32 = bounds.size.height.into();
+                            let raw: f32 = event.position.y.into();
+                            let max_h = win_h - (TITLEBAR_HEIGHT + STATUSBAR_HEIGHT);
+                            this.terminal_height_px = (win_h - STATUSBAR_HEIGHT - raw).clamp(MIN_TERMINAL_HEIGHT, max_h);
+                            if let Some(entity) = this.terminal_entity.as_ref() {
+                                let (cols, rows) = terminal_grid_size(window, this.terminal_height_px);
+                                entity.update(cx, |terminal, _| terminal.resize(cols, rows));
+                            }
+                            cx.notify();
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                                this.resize_target = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .into_any()
         } else {
             app.into_any()
         }
     }
+}
+
+fn terminal_grid_size(window: &Window, panel_height: f32) -> (usize, usize) {
+    let width: f32 = window.bounds().size.width.into();
+    let cols = ((width - 16.0) / 7.0).floor().max(20.0) as usize;
+    let rows = ((panel_height - 28.0) / 16.0).floor().max(4.0) as usize;
+    (cols, rows)
 }
 
 fn project_locator(project: &Project) -> ProjectLocator {
@@ -7436,6 +7691,7 @@ fn remote_parent_path(path: &str) -> Option<String> {
 
 pub(crate) fn run() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        Assets::register_fonts(cx).expect("failed to register the bundled terminal font");
         gpui_component::init(cx);
         gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         let component_theme = gpui_component::Theme::global_mut(cx);

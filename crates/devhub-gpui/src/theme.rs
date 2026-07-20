@@ -3,6 +3,7 @@ use gpui::{rgb, Hsla, WindowAppearance};
 
 pub const UI_FONT: &str = "Segoe UI";
 pub const MONO_FONT: &str = "Consolas";
+pub const TERMINAL_FONT: &str = "DepartureMono Nerd Font Mono";
 
 #[derive(Clone, Copy)]
 pub struct Theme {

@@ -1,8 +1,17 @@
 use std::borrow::Cow;
 
-use gpui::{AssetSource, Result, SharedString};
+use gpui::{App, AssetSource, Result, SharedString};
 
 pub(crate) struct Assets;
+
+impl Assets {
+    pub(crate) fn register_fonts(cx: &App) -> Result<()> {
+        cx.text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                "../assets/fonts/DepartureMono/DepartureMonoNerdFontMono-Regular.otf"
+            ))])
+    }
+}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
