@@ -1,0 +1,87 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="256"
+  height="256"
+  fill="none"
+  viewBox="0 0 256 256"
+>
+  <defs>
+    <linearGradient
+      id="route-glow-color"
+      x1="43"
+      y1="218"
+      x2="160"
+      y2="69"
+      gradientUnits="userSpaceOnUse"
+    >
+      <stop offset="0%" stop-color="#585858" stop-opacity=".16"/>
+      <stop offset="58%" stop-color="#B8B8B8" stop-opacity=".38"/>
+      <stop offset="100%" stop-color="#F0F0F0" stop-opacity=".26"/>
+    </linearGradient>
+    <filter id="route-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="17"/>
+    </filter>
+    <filter id="center-glow" x="0" y="0" width="256" height="256" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="34"/>
+    </filter>
+    <clipPath id="tile-clip">
+      <rect width="256" height="256" rx="30"/>
+    </clipPath>
+    <mask id="route-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="#FFF"/>
+      <path
+        d="M43 218 160 69"
+        stroke="#000"
+        stroke-width="32"
+        stroke-linecap="square"
+      />
+    </mask>
+  </defs>
+
+  <rect width="256" height="256" rx="30" fill="#0E0E0E"/>
+  <g clip-path="url(#tile-clip)">
+    <ellipse
+      cx="128"
+      cy="124"
+      rx="48"
+      ry="52"
+      fill="#4A4A4A"
+      fill-opacity=".20"
+      filter="url(#center-glow)"
+    />
+  </g>
+  <g clip-path="url(#tile-clip)" transform="translate(30.72 30.72) scale(.76)">
+    <path
+      d="M43 218 160 69"
+      stroke="url(#route-glow-color)"
+      stroke-width="24"
+      stroke-linecap="square"
+      filter="url(#route-glow)"
+    />
+  </g>
+
+  <g transform="translate(30.72 30.72) scale(.76)">
+    <g mask="url(#route-cut)">
+      <path
+        d="M48 32v192h76c60 0 98-37 98-96s-38-96-98-96H48Z"
+        stroke="#D8D8D8"
+        stroke-width="16"
+        stroke-linejoin="round"
+      />
+
+      <path
+        d="M84 68v120h37c39 0 63-23 63-60s-24-60-63-60H84Z"
+        stroke="#D8D8D8"
+        stroke-width="16"
+        stroke-linejoin="round"
+      />
+    </g>
+
+    <path
+      d="M43 218 160 69"
+      stroke="#D8D8D8"
+      stroke-width="16"
+      stroke-linecap="square"
+    />
+  </g>
+</svg>
