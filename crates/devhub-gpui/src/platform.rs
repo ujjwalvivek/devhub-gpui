@@ -1,5 +1,4 @@
 use gpui::Window;
-use std::path::Path;
 
 #[cfg(target_os = "windows")]
 fn windows_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
@@ -93,59 +92,4 @@ pub(crate) fn toggle_window_zoom(window: &Window) {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn begin_window_drag(window: &Window) {
     window.start_window_move();
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn open_with_picker(path: &Path, window: &Window) {
-    open_with_target(path.as_os_str().to_os_string(), window);
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn open_uri_with_picker(uri: &str, window: &Window) {
-    open_with_target(uri.into(), window);
-}
-
-#[cfg(target_os = "windows")]
-fn open_with_target(target: std::ffi::OsString, window: &Window) {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Shell::{
-        SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO,
-    };
-
-    let hwnd_raw = windows_hwnd(window).map(|h| h.0 as isize);
-    let path_wide: Vec<u16> = target.encode_wide().chain(Some(0)).collect();
-
-    std::thread::spawn(move || {
-        let hwnd = hwnd_raw.map(|raw| HWND(raw as *mut std::ffi::c_void));
-        let info = OPENASINFO {
-            pcszFile: PCWSTR(path_wide.as_ptr()),
-            pcszClass: PCWSTR::null(),
-            oaifInFlags: OAIF_EXEC | OAIF_ALLOW_REGISTRATION,
-        };
-        unsafe {
-            let _ = SHOpenWithDialog(hwnd, &info);
-        }
-    });
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-pub(crate) fn open_with_picker(path: &Path, _window: &Window) {
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-pub(crate) fn open_uri_with_picker(uri: &str, _window: &Window) {
-    let _ = std::process::Command::new("xdg-open").arg(uri).spawn();
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn open_with_picker(path: &Path, _window: &Window) {
-    let _ = std::process::Command::new("open").arg(path).spawn();
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn open_uri_with_picker(uri: &str, _window: &Window) {
-    let _ = std::process::Command::new("open").arg(uri).spawn();
 }

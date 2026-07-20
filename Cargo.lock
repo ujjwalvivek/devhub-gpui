@@ -1292,6 +1292,8 @@ dependencies = [
  "portable-pty",
  "raw-window-handle",
  "resvg",
+ "serde",
+ "serde_json",
  "vte",
  "windows 0.61.3",
  "winresource",

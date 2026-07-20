@@ -1,8 +1,5 @@
 use crate::assets::Assets;
-use crate::platform::{
-    begin_window_drag, configure_windows_surface, open_uri_with_picker, open_with_picker,
-    toggle_window_zoom,
-};
+use crate::platform::{begin_window_drag, configure_windows_surface, toggle_window_zoom};
 use crate::ui::{
     file_icon, message_panel, project_type_color, scan_state_color, scan_status, section_label,
     window_control, workbench_message,
@@ -17,19 +14,19 @@ use devhub_core::{
     load_projects_with_diagnostics, local_roots, open_project_in_zed,
     read_project_file_cancellable, read_project_readme_cancellable, save_projects_with_diagnostics,
     scan_directories_cancellable, scan_remote_host_cancellable, search_project_content_cancellable,
-    sort_projects, validate_remote_path, validate_ssh_host, zed_ssh_uri, AppearanceMode,
-    CancellationToken, CommitEntry, CommitFileChange, Config, DirectoryEntry, FileEntry, GitBranch,
-    GitDiffKind, GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus,
-    PersistenceEvent, PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit,
-    ThemeId, TreeListing, HISTORY_PAGE_SIZE,
+    sort_projects, validate_remote_path, validate_ssh_host, AppearanceMode, CancellationToken,
+    CommitEntry, CommitFileChange, Config, DirectoryEntry, FileEntry, GitBranch, GitDiffKind,
+    GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus, PersistenceEvent,
+    PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
+    HISTORY_PAGE_SIZE,
 };
 use devhub_gpui::{
-    filtered_commands, filtered_project_indices, filtered_themes, has_scan_sources,
-    language_for_path, next_selection, omit_markdown_images, parse_unified_diff,
+    detect_editors, filtered_commands, filtered_editors, filtered_project_indices, filtered_themes,
+    has_scan_sources, language_for_path, next_selection, omit_markdown_images, parse_unified_diff,
     partition_local_scan_roots, persistence_status_text, previous_selection, scan_sources_changed,
-    should_show_ftue, visible_project_row, Activity, CommandId, CommandSpec, DiffLine,
-    DiffLineKind, PersistenceHistory, ScanModel, ScanState, TerminalLaunch, TerminalPanel, Theme,
-    MONO_FONT, TERMINAL_FONT, UI_FONT,
+    should_show_ftue, visible_project_row, Activity, CommandId, CommandSpec, DetectedEditor,
+    DiffLine, DiffLineKind, PersistenceHistory, ScanModel, ScanState, TerminalLaunch,
+    TerminalPanel, Theme, MONO_FONT, TERMINAL_FONT, UI_FONT,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -78,6 +75,15 @@ struct HistoryIcon;
 impl IconNamed for HistoryIcon {
     fn path(self) -> SharedString {
         "history.svg".into()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ScanSearchIcon;
+
+impl IconNamed for ScanSearchIcon {
+    fn path(self) -> SharedString {
+        "scan-search.svg".into()
     }
 }
 
@@ -158,6 +164,8 @@ struct DevHubLite {
     launcher_selected: usize,
     launcher_input: Entity<InputState>,
     launcher_scroll: ScrollHandle,
+    detected_editors: Vec<DetectedEditor>,
+    editor_discovery_complete: bool,
     _launcher_subscription: Subscription,
     search_query: String,
     search_input: Entity<InputState>,
@@ -230,6 +238,7 @@ pub(crate) enum WindowCommand {
 enum LauncherMode {
     Branches,
     Commands,
+    Editors,
     Projects,
     Themes,
 }
@@ -418,6 +427,8 @@ impl DevHubLite {
             launcher_selected: 0,
             launcher_input,
             launcher_scroll: ScrollHandle::new(),
+            detected_editors: Vec::new(),
+            editor_discovery_complete: false,
             _launcher_subscription,
             search_query: String::new(),
             search_input,
@@ -471,7 +482,7 @@ impl DevHubLite {
             history_open_error: None,
 
             files_context_width_px: 160.0,
-            search_context_width_px: 180.0,
+            search_context_width_px: 205.0,
             git_context_width_px: 285.0,
             project_catalog_width_px: 276.0,
             terminal_height_px: 200.0,
@@ -1674,6 +1685,24 @@ impl DevHubLite {
             .collect()
     }
 
+    fn launcher_editors(&self) -> Vec<DetectedEditor> {
+        let Some(project) = self.selected_project() else {
+            return Vec::new();
+        };
+        filtered_editors(&self.detected_editors, &self.launcher_query, project)
+    }
+
+    fn open_editor_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_project().is_none() {
+            return;
+        }
+        if !self.editor_discovery_complete {
+            self.detected_editors = detect_editors();
+            self.editor_discovery_complete = true;
+        }
+        self.open_launcher(LauncherMode::Editors, window, cx);
+    }
+
     fn open_launcher(&mut self, mode: LauncherMode, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         self.git_context_menu = None;
@@ -1704,6 +1733,7 @@ impl DevHubLite {
                 })
                 .unwrap_or_default(),
             LauncherMode::Commands => 0,
+            LauncherMode::Editors => 0,
             LauncherMode::Themes => filtered_themes("")
                 .iter()
                 .position(|selection| {
@@ -1731,6 +1761,7 @@ impl DevHubLite {
         match self.launcher {
             Some(LauncherMode::Branches) => self.launcher_branches().len(),
             Some(LauncherMode::Commands) => self.launcher_commands().len(),
+            Some(LauncherMode::Editors) => self.launcher_editors().len(),
             Some(LauncherMode::Projects) => self.launcher_project_indices().len(),
             Some(LauncherMode::Themes) => filtered_themes(&self.launcher_query).len(),
             None => 0,
@@ -1776,6 +1807,18 @@ impl DevHubLite {
                 };
                 self.close_launcher(window, cx);
                 self.execute_command(command.id, window, cx);
+            }
+            Some(LauncherMode::Editors) => {
+                let Some(editor) = self.launcher_editors().get(self.launcher_selected).cloned()
+                else {
+                    return;
+                };
+                self.close_launcher(window, cx);
+                let Some(project) = self.selected_project().cloned() else {
+                    return;
+                };
+                self.launch_error = editor.launch(&project).err();
+                cx.notify();
             }
             Some(LauncherMode::Projects) => {
                 let Some(&project_index) =
@@ -1862,7 +1905,7 @@ impl DevHubLite {
                 self.run_git_action(GitAction::Push { set_upstream }, cx);
             }
             CommandId::OpenInZed => self.launch_selected_in_zed(cx),
-            CommandId::OpenWith => self.launch_selected_with_picker(window, cx),
+            CommandId::OpenInEditor => self.open_editor_launcher(window, cx),
             CommandId::ToggleProjectPin => {
                 if let Some(index) = self.selected {
                     self.toggle_pin(index, cx);
@@ -1904,7 +1947,7 @@ impl DevHubLite {
     fn command_enabled(&self, command: CommandId) -> bool {
         match command {
             CommandId::OpenInZed
-            | CommandId::OpenWith
+            | CommandId::OpenInEditor
             | CommandId::ToggleProjectPin
             | CommandId::HideProject
             | CommandId::CopyProjectPath => self.selected_project().is_some(),
@@ -2131,25 +2174,6 @@ impl DevHubLite {
         };
 
         self.launch_error = open_project_in_zed(&project).err();
-        cx.notify();
-    }
-
-    fn launch_selected_with_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.selected_project().cloned() else {
-            return;
-        };
-        self.launch_error = if project.source.is_remote() {
-            match zed_ssh_uri(&project) {
-                Ok(uri) => {
-                    open_uri_with_picker(&uri, window);
-                    None
-                }
-                Err(error) => Some(error),
-            }
-        } else {
-            open_with_picker(&project.path, window);
-            None
-        };
         cx.notify();
     }
 
@@ -6318,7 +6342,12 @@ impl DevHubLite {
         navigation.into_any_element()
     }
 
-    fn launcher_panel(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn launcher_panel(
+        &self,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(mode) = self.launcher else {
             return div().into_any_element();
         };
@@ -6326,23 +6355,41 @@ impl DevHubLite {
         let title = match mode {
             LauncherMode::Branches => "Branches",
             LauncherMode::Commands => "Commands",
+            LauncherMode::Editors => "Open in",
             LauncherMode::Projects => "Projects",
             LauncherMode::Themes => "Themes",
         };
+        let panel_width = match mode {
+            LauncherMode::Branches => 280.0,
+            LauncherMode::Editors => 300.0,
+            LauncherMode::Commands | LauncherMode::Projects | LauncherMode::Themes => 350.0,
+        };
+        let window_width: f32 = window.bounds().size.width.into();
+        let panel_left = ((window_width - panel_width) / 2.0).max(4.0);
         let app_for_close = app.clone();
         let app_for_backdrop = app.clone();
 
-        let (empty_message, empty_color) = if mode == LauncherMode::Branches {
-            match &self.git_branches_state {
+        let (empty_message, empty_color) = match mode {
+            LauncherMode::Branches => match &self.git_branches_state {
                 LoadState::Loading | LoadState::Idle => {
                     ("loading branches...".to_string(), theme.text_disabled)
                 }
                 LoadState::Error(error) => (error.clone(), theme.error),
                 LoadState::Empty => ("no local branches".to_string(), theme.text_muted),
                 LoadState::Loaded(_) => ("no matches".to_string(), theme.text_muted),
+            },
+            LauncherMode::Editors if self.launcher_query.trim().is_empty() => {
+                let message = if self
+                    .selected_project()
+                    .is_some_and(|project| project.source.is_remote())
+                {
+                    "no detected editor supports SSH projects"
+                } else {
+                    "no compatible editors detected"
+                };
+                (message.to_string(), theme.text_muted)
             }
-        } else {
-            ("no matches".to_string(), theme.text_muted)
+            _ => ("no matches".to_string(), theme.text_muted),
         };
 
         let rows = match mode {
@@ -6449,6 +6496,47 @@ impl DevHubLite {
                                     .child(shortcut),
                             )
                         })
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.launcher_selected = index;
+                                this.accept_launcher_selection(window, cx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+            LauncherMode::Editors => self
+                .launcher_editors()
+                .into_iter()
+                .enumerate()
+                .map(|(index, editor)| {
+                    let app = app.clone();
+                    div()
+                        .id(("editor", index))
+                        .h(px(26.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.35))
+                        .cursor_pointer()
+                        .bg(if self.launcher_selected == index {
+                            theme.surface_selected
+                        } else {
+                            theme.surface_background
+                        })
+                        .hover(move |style| style.bg(theme.surface_hover))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_size(px(11.0))
+                                .text_color(theme.text)
+                                .child(editor.label().to_string()),
+                        )
                         .on_click(move |_, window, cx| {
                             app.update(cx, |this, cx| {
                                 this.launcher_selected = index;
@@ -6599,15 +6687,14 @@ impl DevHubLite {
                     .absolute()
                     .key_context("DevHubLauncher")
                     .top(px(TITLEBAR_HEIGHT + 4.0))
-                    .left(px(36.0))
-                    .w(px(350.0))
+                    .left(px(panel_left))
+                    .w(px(panel_width))
                     .max_h(px(310.0))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border_strong)
-                    .rounded_sm()
                     .bg(theme.surface_background)
                     .occlude()
                     .children(vec![
@@ -7104,7 +7191,7 @@ impl Render for DevHubLite {
         let launcher_panel = self
             .launcher
             .is_some()
-            .then(|| self.launcher_panel(theme, cx));
+            .then(|| self.launcher_panel(theme, window, cx));
 
         let app = div()
             .id("app")
@@ -7290,22 +7377,22 @@ impl Render for DevHubLite {
                     .child({
                         let app = cx.entity();
                         Button::new("open-project-with-picker")
-                            .icon(IconName::Ellipsis)
-                            .tooltip("Open project with...")
+                            .icon(IconName::ExternalLink)
+                            .tooltip("Open project in another editor")
                             .xsmall()
                             .compact()
                             .custom(chrome_button_style)
                             .disabled(!has_selected_project)
                             .on_click(move |_, window, cx| {
                                 app.update(cx, |this, cx| {
-                                    this.launch_selected_with_picker(window, cx);
+                                    this.open_editor_launcher(window, cx);
                                 });
                             })
                     })
                     .child({
                         let app = cx.entity();
                         Button::new("scan-current-folder")
-                            .icon(IconName::Redo2)
+                            .icon(ScanSearchIcon)
                             .tooltip("Refresh projects (Ctrl+R)")
                             .xsmall()
                             .compact()
@@ -7482,7 +7569,7 @@ impl Render for DevHubLite {
                             chrome_button_style
                         };
                         Button::new("toggle-terminal")
-                            .icon(IconName::SquareTerminal)
+                            .icon(IconName::PanelBottom)
                             .tooltip("Toggle Terminal (Ctrl+`)")
                             .xsmall()
                             .compact()

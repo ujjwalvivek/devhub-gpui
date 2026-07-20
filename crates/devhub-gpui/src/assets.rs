@@ -26,6 +26,11 @@ impl AssetSource for Assets {
         if path == "history.svg" {
             return Ok(Some(Cow::Borrowed(include_bytes!("../assets/history.svg"))));
         }
+        if path == "scan-search.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/scan-search.svg"
+            ))));
+        }
         gpui_component_assets::Assets.load(path)
     }
 
@@ -35,6 +40,7 @@ impl AssetSource for Assets {
             assets.push("zed.svg".into());
             assets.push("git-branch.svg".into());
             assets.push("history.svg".into());
+            assets.push("scan-search.svg".into());
         }
         Ok(assets)
     }

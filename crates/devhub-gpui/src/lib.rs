@@ -1,5 +1,6 @@
 mod commands;
 mod diagnostics;
+mod editors;
 mod scan;
 mod shell;
 mod terminal;
@@ -7,6 +8,7 @@ mod theme;
 
 pub use commands::{filtered_commands, filtered_themes, CommandId, CommandSpec, ThemeSelection};
 pub use diagnostics::{persistence_status_text, PersistenceHistory};
+pub use editors::{detect_editors, filtered_editors, DetectedEditor};
 pub use shell::{visible_project_row, Activity};
 pub use terminal::{TerminalLaunch, TerminalPanel};
 
