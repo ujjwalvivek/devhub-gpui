@@ -1,3 +1,4 @@
+mod ai;
 mod cache;
 mod cancellation;
 mod config;
@@ -8,6 +9,13 @@ mod remote;
 mod ssh;
 mod workspace;
 
+pub use ai::{
+    clear_project_context, delete_zen_api_key, fetch_opencode_models,
+    load_or_build_project_context, parse_architecture_response, question_excerpts,
+    store_zen_api_key, stream_opencode_answer, zen_api_key_exists, ArchitectureEdge,
+    ArchitectureGraph, ArchitectureNode, ArchitectureResponse, OpenCodeService, ProjectContext,
+    ProjectContextFile, ZenError, ZenErrorKind, ZenModel,
+};
 pub use cache::{
     cache_path, load_projects, load_projects_with_diagnostics, save_projects,
     save_projects_with_diagnostics,

@@ -29,6 +29,7 @@ pub enum CommandId {
     SelectTheme,
     ShowSettings,
     ToggleTerminal,
+    ToggleAskProject,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +40,7 @@ pub struct CommandSpec {
     pub shortcut: Option<&'static str>,
 }
 
-pub const COMMANDS: [CommandSpec; 27] = [
+pub const COMMANDS: [CommandSpec; 28] = [
     CommandSpec {
         id: CommandId::ToggleProjectCatalog,
         title: "Toggle Project Catalog",
@@ -201,6 +202,12 @@ pub const COMMANDS: [CommandSpec; 27] = [
         title: "Toggle Terminal",
         category: "View",
         shortcut: Some("Ctrl+`"),
+    },
+    CommandSpec {
+        id: CommandId::ToggleAskProject,
+        title: "Toggle Ask Project",
+        category: "View",
+        shortcut: Some("Ctrl+Shift+A"),
     },
 ];
 

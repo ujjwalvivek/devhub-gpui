@@ -1,3 +1,4 @@
+use crate::ask::{AskPanel, CloseAskPanel, OpenAskPath};
 use crate::assets::Assets;
 use crate::platform::{begin_window_drag, configure_windows_surface, toggle_window_zoom};
 use crate::ui::{
@@ -109,6 +110,7 @@ actions!(
         DismissLauncher,
         AcceptLauncher,
         ToggleTerminal,
+        ToggleAskProject,
     ]
 );
 
@@ -145,6 +147,8 @@ struct DevHubLite {
     terminal_visible: bool,
     terminal_entity: Option<Entity<TerminalPanel>>,
     terminal_owner: Option<ProjectLocator>,
+    ask_panel_visible: bool,
+    ask_panel_entity: Option<Entity<AskPanel>>,
     context_pane_visible: bool,
     tree_state: LoadState<TreeListing>,
     tree_generation: u64,
@@ -223,6 +227,7 @@ struct DevHubLite {
     git_context_width_px: f32,
     project_catalog_width_px: f32,
     terminal_height_px: f32,
+    ask_panel_width_px: f32,
     resize_target: Option<ResizeTarget>,
     context_menu: Option<(usize, f32, f32)>,
 }
@@ -248,6 +253,7 @@ enum ResizeTarget {
     WorkspaceContext,
     ProjectCatalog,
     Terminal,
+    AskPanel,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -408,6 +414,8 @@ impl DevHubLite {
             terminal_visible: false,
             terminal_entity: None,
             terminal_owner: None,
+            ask_panel_visible: false,
+            ask_panel_entity: None,
             context_pane_visible: true,
             tree_state: LoadState::Idle,
             tree_generation: 0,
@@ -486,6 +494,7 @@ impl DevHubLite {
             git_context_width_px: 285.0,
             project_catalog_width_px: 276.0,
             terminal_height_px: 200.0,
+            ask_panel_width_px: 360.0,
             resize_target: None,
             context_menu: None,
         }
@@ -822,6 +831,7 @@ impl DevHubLite {
         if self.terminal_owner.as_ref() != Some(&owner) {
             self.end_terminal_session();
         }
+        self.end_ask_session(cx);
         self.selected = Some(project_index);
         self.missing_project = None;
         self.remember_project(&project);
@@ -1941,6 +1951,7 @@ impl DevHubLite {
             CommandId::SelectTheme => self.open_launcher(LauncherMode::Themes, window, cx),
             CommandId::ShowSettings => self.open_settings(window, cx),
             CommandId::ToggleTerminal => self.toggle_terminal(window, cx),
+            CommandId::ToggleAskProject => self.toggle_ask_project(window, cx),
         }
     }
 
@@ -1948,6 +1959,7 @@ impl DevHubLite {
         match command {
             CommandId::OpenInZed
             | CommandId::OpenInEditor
+            | CommandId::ToggleAskProject
             | CommandId::ToggleProjectPin
             | CommandId::HideProject
             | CommandId::CopyProjectPath => self.selected_project().is_some(),
@@ -2053,6 +2065,7 @@ impl DevHubLite {
             self.project_scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
             self.end_terminal_session();
+            self.end_ask_session(cx);
             self.selected = None;
             self.reset_workspace(cx);
         }
@@ -3418,6 +3431,16 @@ impl DevHubLite {
         self.terminal_visible = false;
     }
 
+    fn end_ask_session(&mut self, cx: &mut Context<Self>) {
+        if let Some(entity) = self.ask_panel_entity.take() {
+            entity.update(cx, |panel, _| panel.end_session());
+        }
+        self.ask_panel_visible = false;
+        if self.resize_target == Some(ResizeTarget::AskPanel) {
+            self.resize_target = None;
+        }
+    }
+
     fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project().cloned() else {
             return;
@@ -3480,8 +3503,81 @@ impl DevHubLite {
         cx.notify();
     }
 
+    fn toggle_ask_project_action(
+        &mut self,
+        _: &ToggleAskProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_ask_project(window, cx);
+    }
+
+    fn toggle_ask_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        if self.ask_panel_visible {
+            self.ask_panel_visible = false;
+            self.resize_target = None;
+            window.focus(&self.focus_handle);
+            cx.notify();
+            return;
+        }
+
+        if let Some(entity) = self.ask_panel_entity.as_ref() {
+            entity.update(cx, |panel, cx| panel.set_project(project, cx));
+        } else {
+            let theme = Theme::for_preferences(
+                self.config.theme,
+                self.config.appearance,
+                window.appearance(),
+            );
+            let entity = cx.new(|cx| AskPanel::new(project, theme, window, cx));
+            cx.subscribe(&entity, |this, _, _: &CloseAskPanel, cx| {
+                this.ask_panel_visible = false;
+                this.resize_target = None;
+                cx.notify();
+            })
+            .detach();
+            cx.subscribe(&entity, |this, _, event: &OpenAskPath, cx| {
+                this.git_refresh_generation = this.git_refresh_generation.wrapping_add(1);
+                this.show_settings = false;
+                this.context_menu = None;
+                this.git_context_menu = None;
+                this.activity = Activity::Files;
+                this.context_pane_visible = true;
+                if matches!(this.tree_state, LoadState::Idle) {
+                    this.load_tree(cx);
+                }
+                this.selected_file = Some(event.0.clone());
+                this.pending_document_line = None;
+                this.load_file_content(cx);
+                cx.notify();
+            })
+            .detach();
+            self.ask_panel_entity = Some(entity);
+        }
+        self.show_settings = false;
+        self.ask_panel_visible = true;
+        self.resize_target = None;
+        cx.notify();
+    }
+
+    fn toggle_terminal_action(
+        &mut self,
+        _: &ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_terminal(window, cx);
+    }
+
     fn show_overview(&mut self, _: &ShowOverview, window: &mut Window, cx: &mut Context<Self>) {
         self.set_activity(Activity::Overview, window, cx);
+    }
+
+    fn show_history(&mut self, _: &ShowHistory, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_activity(Activity::History, window, cx);
     }
 
     fn show_files(&mut self, _: &ShowFiles, window: &mut Window, cx: &mut Context<Self>) {
@@ -6124,49 +6220,20 @@ impl DevHubLite {
         let dragging = self.resize_target == Some(ResizeTarget::ProjectCatalog);
 
         div()
-            .absolute()
-            .top(px(TITLEBAR_HEIGHT))
-            .bottom(px(STATUSBAR_HEIGHT))
-            .left_0()
-            .right_0()
+            .h_full()
+            .w(px(self.project_catalog_width_px + 4.0))
+            .flex_shrink_0()
             .flex()
-            .occlude()
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.resize_target == Some(ResizeTarget::ProjectCatalog) {
-                        this.resize_target = None;
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if this.resize_target == Some(ResizeTarget::ProjectCatalog) {
-                    let raw: f32 = event.position.x.into();
-                    this.project_catalog_width_px = raw.clamp(180.0, 520.0);
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                app.update(cx, |this, cx| {
-                    this.project_catalog_open = false;
-                    this.resize_target = None;
-                    window.focus(&this.focus_handle);
-                    cx.notify();
-                });
-            })
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .bg(theme.sidebar_background)
             .child(
                 div()
                     .h_full()
                     .w(px(self.project_catalog_width_px))
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .border_r_1()
-                    .border_color(theme.border_strong)
-                    .bg(theme.sidebar_background)
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .border_color(theme.border)
                     .child(
                         div()
                             .h(px(32.0))
@@ -6222,7 +6289,7 @@ impl DevHubLite {
                     .flex_shrink_0()
                     .bg(if dragging { theme.focus } else { theme.border })
                     .hover(move |style| style.bg(theme.focus))
-                    .cursor_pointer()
+                    .cursor(CursorStyle::ResizeLeftRight)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -6232,27 +6299,6 @@ impl DevHubLite {
                         }),
                     ),
             )
-            .when(dragging, |catalog| {
-                catalog.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                            let raw: f32 = event.position.x.into();
-                            this.project_catalog_width_px = raw.clamp(180.0, 520.0);
-                            cx.notify();
-                        }))
-                        .on_mouse_up(
-                            MouseButton::Left,
-                            cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                this.resize_target = None;
-                                cx.notify();
-                            }),
-                        ),
-                )
-            })
             .into_any_element()
     }
 
@@ -7192,6 +7238,42 @@ impl Render for DevHubLite {
             .launcher
             .is_some()
             .then(|| self.launcher_panel(theme, window, cx));
+        let ask_panel = (!self.show_settings && self.ask_panel_visible)
+            .then_some(self.ask_panel_entity.as_ref())
+            .flatten()
+            .map(|entity| {
+                entity.update(cx, |panel, _| panel.set_theme(theme));
+                let dragging = self.resize_target == Some(ResizeTarget::AskPanel);
+                div()
+                    .w(px(self.ask_panel_width_px))
+                    .min_w(px(280.0))
+                    .max_w(px(560.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("ask-panel-resize-handle")
+                            .w(px(4.0))
+                            .h_full()
+                            .flex_shrink_0()
+                            .bg(if dragging { theme.focus } else { theme.border })
+                            .hover(move |style| style.bg(theme.focus))
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                                    this.resize_target = Some(ResizeTarget::AskPanel);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(div().min_w_0().flex_1().h_full().child(entity.clone()))
+                    .into_any_element()
+            });
 
         let app = div()
             .id("app")
@@ -7211,7 +7293,10 @@ impl Render for DevHubLite {
             .on_action(cx.listener(Self::show_files))
             .on_action(cx.listener(Self::show_search))
             .on_action(cx.listener(Self::show_git))
+            .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::toggle_context_pane))
+            .on_action(cx.listener(Self::toggle_terminal_action))
+            .on_action(cx.listener(Self::toggle_ask_project_action))
             .on_action(cx.listener(Self::dismiss_launcher))
             .on_action(cx.listener(Self::accept_launcher))
             .on_action(cx.listener(Self::note_component_copy))
@@ -7458,9 +7543,13 @@ impl Render for DevHubLite {
                             .size_full()
                             .min_h_0()
                             .flex()
+                            .when_some(project_catalog_panel, |workspace, catalog| {
+                                workspace.child(catalog)
+                            })
                             .child(
                                 div()
-                                    .size_full()
+                                    .h_full()
+                                    .flex_1()
                                     .min_w_0()
                                     .min_h_0()
                                     .flex()
@@ -7468,6 +7557,7 @@ impl Render for DevHubLite {
                                     .bg(theme.panel_background)
                                     .child(self.render_details_panel(theme, window, cx)),
                             )
+                            .when_some(ask_panel, |workspace, panel| workspace.child(panel))
                             .into_any()
                     }),
             )
@@ -7579,9 +7669,28 @@ impl Render for DevHubLite {
                                     this.toggle_terminal(window, cx);
                                 });
                             })
+                    })
+                    .child({
+                        let app = cx.entity();
+                        let style = if self.ask_panel_visible {
+                            active_chrome_button_style
+                        } else {
+                            chrome_button_style
+                        };
+                        Button::new("toggle-ask-project")
+                            .icon(IconName::Bot)
+                            .tooltip("Ask Project (Ctrl+Shift+A)")
+                            .xsmall()
+                            .compact()
+                            .custom(style)
+                            .disabled(self.selected_project().is_none())
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |this, cx| {
+                                    this.toggle_ask_project(window, cx);
+                                });
+                            })
                     }),
             )
-            .when_some(project_catalog_panel, |app, catalog| app.child(catalog))
             .when_some(launcher_panel, |app, launcher| app.child(launcher));
 
         if let Some((project_index, raw_x, raw_y)) = self.context_menu {
@@ -7762,6 +7871,58 @@ impl Render for DevHubLite {
                                         });
                                     },
                                 )),
+                        ),
+                )
+                .into_any()
+        } else if self.resize_target == Some(ResizeTarget::ProjectCatalog) {
+            div()
+                .relative()
+                .size_full()
+                .child(app)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                            let raw_x: f32 = event.position.x.into();
+                            this.project_catalog_width_px = raw_x.clamp(180.0, 520.0);
+                            cx.notify();
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseUpEvent, _window, cx| {
+                                this.resize_target = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .into_any()
+        } else if self.resize_target == Some(ResizeTarget::AskPanel) {
+            div()
+                .relative()
+                .size_full()
+                .child(app)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                            let win_w: f32 = window.bounds().size.width.into();
+                            let raw_x: f32 = event.position.x.into();
+                            let max_width = (win_w - 320.0).clamp(280.0, 560.0);
+                            this.ask_panel_width_px = (win_w - raw_x).clamp(280.0, max_width);
+                            cx.notify();
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseUpEvent, _window, cx| {
+                                this.resize_target = None;
+                                cx.notify();
+                            }),
                         ),
                 )
                 .into_any()
@@ -8644,6 +8805,8 @@ pub(crate) fn run() {
             KeyBinding::new("ctrl-5", ShowGit, Some("DevHub")),
             KeyBinding::new("ctrl-6", ShowHistory, Some("DevHub")),
             KeyBinding::new("ctrl-b", ToggleContextPane, Some("DevHub")),
+            KeyBinding::new("ctrl-`", ToggleTerminal, Some("DevHub")),
+            KeyBinding::new("ctrl-shift-a", ToggleAskProject, Some("DevHub")),
             KeyBinding::new("up", SelectPreviousProject, Some("Input && DevHubLauncher")),
             KeyBinding::new("down", SelectNextProject, Some("Input && DevHubLauncher")),
             KeyBinding::new("home", SelectFirstProject, Some("Input && DevHubLauncher")),
