@@ -1,87 +1,33 @@
-# DevHub GPUI 1.1.0
+# DevHub 2.0
 
-DevHub GPUI is a compact, Zed-first project hub for discovering and opening local and SSH-hosted projects. This release contains portable archives for Windows, Linux, and macOS.
+DevHub 2 turns the project catalog into a local-first developer workspace while remaining deliberately smaller than an editor.
 
-## Downloads
+## Highlights
 
-Choose the archive matching your platform:
+- A compact project-centered shell with Overview, Files, Search, Git, and History workspaces.
+- Keyboard-first navigation, command palette, project switcher, and live theme selection.
+- Parser-backed README preview and a shared read-only source viewer.
+- Complete everyday Git flow: changes, semantic diffs, stage, unstage, discard, commit, branch switching, Fetch, Push, and automatic local status refresh.
+- Paginated commit history with topology, refs, commit details, changed files, and per-file diffs.
+- One project-rooted local or SSH terminal with persistent collapse state and explicit process ownership.
+- Zed-first local and SSH handoff plus a detected-editor launcher with project-aware compatibility filtering.
 
-- `devhub-gpui-1.1.0-x86_64-pc-windows-msvc.zip` for Windows x64
-- `devhub-gpui-1.1.0-x86_64-unknown-linux-gnu.tar.gz` for Linux x64
-- `devhub-gpui-1.1.0-aarch64-apple-darwin.tar.gz` for macOS Apple Silicon
+Network access remains explicit. DevHub does not automatically contact Git remotes or load README media.
 
-Each archive contains the executable, `README.md`, `RELEASE.md`, and `LICENSE`. The release also includes `checksums.txt` with SHA-256 hashes for every archive.
+## Artifacts
 
-## Install
+- Windows x64
+- Linux x64
+- macOS Apple Silicon
 
-### Windows
+Each archive contains the executable, `README.md`, `RELEASE.md`, and `LICENSE`. SHA-256 hashes are published in `checksums.txt`.
 
-1. Extract the ZIP to a stable location.
-2. Run `devhub-gpui.exe`.
-3. Windows release builds use the GUI subsystem and do not open a terminal
-   window.
+## Requirements
 
-### Linux
+- Git for repository workflows.
+- OpenSSH configuration and key-based authentication for SSH projects.
+- A POSIX remote environment with standard command-line tools.
+- Linux requires a glibc-based system and a Vulkan-capable desktop stack.
+- The macOS build is an unsigned portable binary, not a notarized app bundle.
 
-1. Extract the archive.
-2. Make the binary executable if required:
-
-   ```sh
-   chmod +x devhub-gpui
-   ```
-
-3. Run `./devhub-gpui`.
-
-The Linux build requires a glibc-based x64 environment, a Vulkan-capable graphics stack, and normal X11 or Wayland desktop libraries.
-
-### macOS
-
-1. Extract the archive.
-2. Run `./devhub-gpui` from the extracted directory.
-
-The macOS artifact targets Apple Silicon. It is an unsigned portable binary, not a notarized `.app` bundle, so macOS may require explicit approval before first launch.
-
-## First launch
-
-The first launch opens source settings. Add at least one local folder or SSH source, choose its scan depth, save, and run a scan. DevHub GPUI never scans the current working directory as an implicit fallback. Configuration and cache data use the separate `devhub-gpui` platform identity. They do not overwrite the original DevHub application's data.
-
-## Project parity
-
-v1.1.0 completes the approved DevHub functional-parity project. The selected
-product workflow is complete:
-scan cancellation with a "Stop" button, remote `.gitignore` semantics via
-`git check-ignore`, pin/unpin and hide/archive projects with persistent config,
-right-click context menus, themed input fields, and Windows SSH without console
-window flash.
-
-## Zed and SSH
-
-Local projects open through the `zed` command. Remote projects use Zed's `ssh://user@host/path` target format.
-
-SSH access must already work non-interactively through OpenSSH configuration,
-keys, or an agent. Remote project discovery requires `sh` and GNU-compatible
-`find`, `grep`, `stat`, `wc`, `head`, and `cat`. Git is required on the remote
-for Git metadata and ignore-rule parity. A PowerShell-only Windows SSH session
-is not compatible with the current remote discovery implementation.
-
-## Verify downloads
-
-Compare an archive's SHA-256 hash with `checksums.txt` before running it.
-
-PowerShell:
-
-```powershell
-Get-FileHash .\devhub-gpui-1.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
-```
-
-Linux or macOS:
-
-```sh
-sha256sum devhub-gpui-1.1.0-x86_64-unknown-linux-gnu.tar.gz
-```
-
-## Upgrade and rollback
-
-Portable releases do not modify themselves. To upgrade, extract the new version to a new directory and launch it against the existing `devhub-gpui` configuration.
-
-To roll back, keep the previous extracted directory and launch its executable. Before downgrading, back up the `devhub-gpui` configuration directory. Older builds refuse to overwrite configuration files declaring a newer schema version.
+Before running an archive, compare its SHA-256 hash with `checksums.txt`.

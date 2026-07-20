@@ -16,12 +16,12 @@
 These are not unfinished parity work. They are possible post-v1.1.0 product
 investments or explicit platform boundaries.
 
-| Capability                              | Complexity | Notes                                                                                                                                                      |
-| --------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-source scan status and errors       | Low        | ScanModel already tracks aggregate state; per-source tracking needs per-root error/result fields and UI per-project-row indicators                         |
-| Manual refresh per root or host         | Medium     | Requires source-level refresh button and per-source cancellation routing; the cancellation infrastructure now exists                                       |
-| Global full-text search index (`grep`)  | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query — a significant standalone feature                                    |
-| SSH requires a POSIX/GNU remote         | N/A        | Hard platform limitation: remote scripts depend on `sh`, `find`, `grep`, `stat`, `wc`, `head`, `cat`; Git provides metadata and ignore parity. SFTP and PowerShell-only servers remain unsupported. |
+| Capability                             | Complexity | Notes                                                                                                                                                                                               |
+| -------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-source scan status and errors      | Low        | ScanModel already tracks aggregate state; per-source tracking needs per-root error/result fields and UI per-project-row indicators                                                                  |
+| Manual refresh per root or host        | Medium     | Requires source-level refresh button and per-source cancellation routing; the cancellation infrastructure now exists                                                                                |
+| Global full-text search index (`grep`) | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query — a significant standalone feature                                                                             |
+| SSH requires a POSIX/GNU remote        | N/A        | Hard platform limitation: remote scripts depend on `sh`, `find`, `grep`, `stat`, `wc`, `head`, `cat`; Git provides metadata and ignore parity. SFTP and PowerShell-only servers remain unsupported. |
 
 ## Status
 
@@ -1488,7 +1488,7 @@ The later visual journey is successful when all of the following are true:
 | 2026-07-02 | Make DevHub a Zed-first project hub                                          | Both local paths and documented Zed SSH URLs open through `zed`; the native application chooser remains a secondary best-effort path rather than maintaining editor profiles.                                                                                    |
 | 2026-07-02 | Persist legacy theme and appearance choices                                  | Five DevHub palettes and System/Dark/Light modes are small serializable preferences; Monochrome Dark remains the migration-safe default for existing visual direction.                                                                                           |
 | 2026-07-02 | Keep independent SSH scan depth                                              | `RemoteHostConfig.max_depth` is now edited per host and is no longer overwritten by the local/global depth on save.                                                                                                                                              |
-| 2026-07-02 | Defer source toggles, FTUE, and Explorer opening                             | Historical decision, partially superseded: a minimal first-run settings flow was later implemented. The remaining choices stayed outside the approved product scope.                                                                                              |
+| 2026-07-02 | Defer source toggles, FTUE, and Explorer opening                             | Historical decision, partially superseded: a minimal first-run settings flow was later implemented. The remaining choices stayed outside the approved product scope.                                                                                             |
 | 2026-07-02 | Ship v1.0.0 as the first standalone tagged release                           | Cross-platform Windows/Linux/macOS archives and SHA-256 checksums attached to the GitHub release; release workflow verified via `github-actions[bot]`; user confirmed native Windows validation of the shipped binary.                                           |
 | 2026-07-02 | Coexistence over cutover                                                     | The egui `devhub` and GPUI `devhub-gpui` coexist as separate products. No identity rename, no config migration, no archival of `devhub`. Internal names stay as-is. The website will present GPUI as the primary "DevHub" and egui as a "Legacy" download.       |
 | 2026-07-02 | Grant a writable exception for `[REDACTED]\devhub\web`                       | The Astro marketing site lives in the read-only egui repo. Website updates require editing it in place. The exception is scoped to `web/` only; egui Rust source remains read-only.                                                                              |
@@ -1504,7 +1504,7 @@ The later visual journey is successful when all of the following are true:
 | 2026-07-03 | Theme filter and SSH/path inputs with `appearance(false)` and bg/border      | Filter input goes edge-to-edge with `.appearance(false)`. Remote name, host, and path inputs get `bg(surface_background)` + `border_color` + 24px height consistency.                                                                                            |
 | 2026-07-03 | Remove hardcoded metadata header height `h(124px)`                           | The fixed height caused a divider overlap with the component README pane. Header now sizes to its content.                                                                                                                                                       |
 | 2026-07-03 | Bump version to v1.1.0; close the parity project                             | Approved functional parity completed. Optional enhancements documented with complexity estimates. The temporary website deferral was superseded by the public-surface closure recorded below.                                                                    |
-| 2026-07-03 | Close the public project surface                                             | The v1.1.0 archives and checksums are published; the live site presents GPUI as primary and the archived egui implementation as legacy. Future work is optional product investment, not unfinished parity.                                                          |
+| 2026-07-03 | Close the public project surface                                             | The v1.1.0 archives and checksums are published; the live site presents GPUI as primary and the archived egui implementation as legacy. Future work is optional product investment, not unfinished parity.                                                       |
 
 Versions to record during Phase 1:
 
@@ -1518,15 +1518,15 @@ Versions to record during Phase 1:
 
 ## Source-reuse ledger
 
-| New destination                                         | DevHub source                                                   | Adaptations                                                                                                                                                                                  | Tests added                                                     |
-| ------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `crates/devhub-core/src/discovery.rs`                   | `[REDACTED]\devhub\src\discovery\scanner.rs` local subset       | Removed egui/serde/tracing/anyhow/SSH/status coupling; Rust 2021 conditions; suppressed synthetic parent after child discovery; added `Serialize`/`Deserialize` derives for cache round-trip | Four isolated filesystem tests                                  |
-| `crates/devhub-core/src/config.rs`                      | `[REDACTED]\devhub\src\config.rs`                               | Distinct `"devhub-gpui"` identity; retained only local/SSH source fields; normalized and merged remote hosts without migrating legacy data                                                   | Six config tests                                                |
-| `crates/devhub-core/src/cache.rs`                       | `[REDACTED]\devhub\src\cache.rs`                                | Start at version 1 (distinct from egui v4); `Option`-returning API; no `anyhow` dependency                                                                                                   | Two cache tests (round-trip, wrong-version rejection)           |
-| `crates/devhub-gpui/src/app.rs` startup and scan flow   | Previous local UI-only fixture struct                           | Uses shared `Project`, `ProjectSource`, and `ProjectType`; production fixtures were removed; startup loads versioned config/cache and scans only explicit roots                              | Startup and scan-state tests plus workspace compile/clippy      |
-| `crates/devhub-gpui/src/platform.rs` (open_with_picker) | Windows `SHOpenWithDialog` API                                  | Isolated in platform.rs; runs on background thread; HWND passed as isize for Send safety                                                                                                     | Covered by workspace compile/clippy                             |
+| New destination                                         | DevHub source                                                   | Adaptations                                                                                                                                                                                     | Tests added                                                            |
+| ------------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `crates/devhub-core/src/discovery.rs`                   | `[REDACTED]\devhub\src\discovery\scanner.rs` local subset       | Removed egui/serde/tracing/anyhow/SSH/status coupling; Rust 2021 conditions; suppressed synthetic parent after child discovery; added `Serialize`/`Deserialize` derives for cache round-trip    | Four isolated filesystem tests                                         |
+| `crates/devhub-core/src/config.rs`                      | `[REDACTED]\devhub\src\config.rs`                               | Distinct `"devhub-gpui"` identity; retained only local/SSH source fields; normalized and merged remote hosts without migrating legacy data                                                      | Six config tests                                                       |
+| `crates/devhub-core/src/cache.rs`                       | `[REDACTED]\devhub\src\cache.rs`                                | Start at version 1 (distinct from egui v4); `Option`-returning API; no `anyhow` dependency                                                                                                      | Two cache tests (round-trip, wrong-version rejection)                  |
+| `crates/devhub-gpui/src/app.rs` startup and scan flow   | Previous local UI-only fixture struct                           | Uses shared `Project`, `ProjectSource`, and `ProjectType`; production fixtures were removed; startup loads versioned config/cache and scans only explicit roots                                 | Startup and scan-state tests plus workspace compile/clippy             |
+| `crates/devhub-gpui/src/platform.rs` (open_with_picker) | Windows `SHOpenWithDialog` API                                  | Isolated in platform.rs; runs on background thread; HWND passed as isize for Send safety                                                                                                        | Covered by workspace compile/clippy                                    |
 | `crates/devhub-core/src/remote.rs`                      | `[REDACTED]\devhub\src\workspace.rs` and `discovery/scanner.rs` | Rebuilt around validated targets, cancellation, hard deadlines, bounded output, hierarchy preservation, remote ignore rules, partial scan errors, strict UTF-8/binary handling, and no `anyhow` | Parser, validation, quoting, hierarchy, cancellation, and ignore tests |
-| `crates/devhub-gpui/src/app.rs` source picker           | `[REDACTED]\devhub\src\app.rs` picker behavior                  | Reimplemented in GPUI as one custom local-drive and SSH-directory browser; removed the Windows COM folder picker                                                                             | Covered by core picker-operation tests and workspace compile    |
+| `crates/devhub-gpui/src/app.rs` source picker           | `[REDACTED]\devhub\src\app.rs` picker behavior                  | Reimplemented in GPUI as one custom local-drive and SSH-directory browser; removed the Windows COM folder picker                                                                                | Covered by core picker-operation tests and workspace compile           |
 
 ## Functional parity matrix
 
@@ -1611,3 +1611,216 @@ This ADR is now the historical engineering record rather than an active task
 queue. The table at the beginning contains optional enhancements and platform
 limits; none blocks closure. If development resumes, record a new dated decision
 and validation baseline instead of silently reopening a completed phase.
+
+---
+
+## V2 Product ADR
+
+| Field        | Value                             |
+| ------------ | --------------------------------- |
+| Status       | Accepted implementation record    |
+| Started      | 2026-07-19                        |
+| Consolidated | 2026-07-20                        |
+| Baseline     | v1.1.0 parity release             |
+| Direction    | Local-first developer project hub |
+
+### V2 decision
+
+V2 extends DevHub from a project catalog into the small workspace a developer
+uses before opening an editor. It remains a project hub, not a second editor.
+The product has five recurring jobs:
+
+1. Find and select the right local or SSH project.
+2. Show only enough project context to decide what to do next.
+3. Read the README and source files without leaving the hub.
+4. Complete the everyday Git loop for the selected repository.
+5. Run an explicit project-rooted terminal when the developer asks for one.
+
+Local work is the default. Reading a local repository, inspecting local Git
+state, browsing cached projects, and opening a local editor require no network.
+SSH access and Git remote actions are explicit. DevHub does not fetch images,
+contact an origin, or start a remote session merely because a project was
+selected.
+
+Every feature must continue to earn its place through a repeated developer
+task. Data availability alone is not a reason to display another label, badge,
+pane, or settings control.
+
+### V2 application shell
+
+V2 adopts a compact contextual shell:
+
+```text
+title bar: project | branch | open actions | explicit operation controls
+workspace: optional task context | main content
+bottom flyout: selected-project terminal, only when requested
+bottom strip: projects | overview | files | search | Git | history | commands
+```
+
+- The title-bar project control is the fast switcher.
+- The resizable project catalog is transient and closes after selection.
+- Overview, Files, Search, Git, and History are the durable workspace modes.
+- Files, Search, and Git own independent context-pane widths.
+- Navigation stays in the compact bottom strip rather than a persistent
+  editor-style activity rail.
+- Launchers are centered, compact, keyboard navigable, dismiss on outside
+  click or `Escape`, and do not scroll the workspace behind them.
+- Focused overlays own `Enter`; application-level key handling cannot turn a
+  palette selection into an unrelated project launch.
+- The last selected project is restored by path and source host. A missing
+  project produces an actionable missing state instead of silently selecting a
+  different project.
+
+### V2 information and visual rules
+
+- Persistent information must help the current task.
+- Normal project surfaces omit raw markers, scan internals, redundant labels,
+  and explanatory microcopy.
+- Common actions use compact familiar icons with tooltips.
+- Project, branch, command, theme, and editor launchers share the same geometry
+  and interaction behavior; widths follow their content.
+- Code, Markdown, Git diffs, history, settings, and terminal surfaces use the
+  same spacing, typography, focus, selection, and status language.
+- Loading and failure stay in the workspace that owns the operation. The
+  title-bar stop control is reserved for an actual catalog scan.
+- Dark and light themes are selected and previewed from the command palette.
+  Settings contains source configuration, not duplicate appearance controls.
+
+### V2 Markdown decision
+
+The existing parser-backed Markdown component remains the preview baseline.
+Raw mode uses the shared read-only source viewer. README images and media are
+not loaded; they render as offline placeholders or explicit links. This keeps
+project reading deterministic and local by default without embedding a browser
+or introducing an asset-fetch policy.
+
+Markdown work is judged by representative fixtures: headings, nested and task
+lists, tables, fenced code, long tokens, Unicode, links, raw HTML degradation,
+and large documents. Raw source remains the fallback whenever preview fidelity
+is incomplete.
+
+### V2 Git decision
+
+V2 uses the installed Git CLI so commands honor the developer's credentials,
+signing setup, attributes, remotes, hooks, and repository formats. Commands are
+passed as argument arrays with bounded output, cancellation, and typed results.
+
+The selected-repository workflow includes:
+
+- Status for staged, unstaged, untracked, renamed, deleted, and conflicted files
+- Per-file and repository-wide addition/deletion totals
+- Flat and tree presentations of the change set
+- Per-file and all-file stage/unstage actions
+- Explicit discard confirmation
+- Semantic unified diffs with old/new gutters and full-row change emphasis
+- A compact multiline commit composer
+- Existing-branch listing, filtering, marking, and switching
+- Explicit Fetch and Push, including the common set-upstream path
+- Automatic local status refresh and active-view SSH status polling
+- Commit history loaded in 25-entry pages as scrolling reaches the end
+- Commit topology and ref labels, selection, compact details, changed-file
+  tree, copy hash, GitHub link when derivable, and per-file commit diff
+
+Automatic status work never contacts the Git origin. Fetch and Push remain
+explicit commands. Network failure reports a concise status and does not block
+repository-local work. DevHub does not attempt to expose every Git command;
+sustained conflict editing and uncommon repository administration remain editor
+or terminal tasks.
+
+### V2 terminal decision
+
+The terminal is an explicit, resizable bottom flyout rooted in the selected
+project. It uses the user's detected shell locally and an interactive SSH shell
+for remote projects. Its PTY, ANSI state, Nerd Font rendering, bounded
+scrollback, input, resize, and process lifecycle belong to the terminal module.
+
+Collapsing the terminal preserves its session. Switching projects ends the
+unpinned session so the next terminal command starts in the newly selected
+project. Pinning preserves the owning session and keeps its host/path visible.
+Closing or dropping a session terminates and reaps its child. No terminal is
+started by project selection, Git inspection, or an editor launch.
+
+### V2 editor handoff decision
+
+Zed remains the primary handoff and supports both local paths and SSH projects.
+`Open in` is a separate detected-editor launcher and does not repeat Zed.
+
+Editors are discovered from operating-system application metadata rather than
+a hardcoded product/path table. Code-family remote capability comes from the
+editor's product metadata. JetBrains products are matched to project language
+families using their declared modules, including mixed-language repositories.
+Unsupported local-only editors are omitted for SSH projects. Editor processes
+receive null stdio and, on Windows, `CREATE_NO_WINDOW`, so opening an editor does
+not leave a console window attached for the IDE session.
+
+### V2 safety boundaries
+
+V2 does not include:
+
+- Automatic Fetch, Push, Pull, or repository mutation
+- Catalog-wide background Git activity
+- Remote image or media fetching
+- A full source editor or merge-conflict editor
+- Branch creation merely to increase Git feature count
+- Cloud accounts, telemetry, or hosted project state
+- UI labels, controls, or panels without a demonstrated workflow
+
+### V2 validation gate
+
+The implementation is release-ready only when all static checks pass and the
+native application is reviewed at compact and wide sizes in dark and light
+themes:
+
+```powershell
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --release --workspace --locked
+```
+
+Native review covers keyboard focus and dismissal, project switching, pane
+resizing, README/raw reading, file and search navigation, local and SSH Git,
+history pagination and commit details, terminal lifecycle, local and remote
+editor handoff, long content, and every loading/empty/error/cancelled state.
+
+### V2 superseded historical decisions
+
+- The generic Windows `SHOpenWithDialog` fallback is superseded by the
+  metadata-driven in-app editor launcher.
+- The manual key-event search field is superseded by normal IME-capable inputs.
+- The permanent list/details layout is superseded by the transient catalog and
+  contextual workspaces.
+- The earlier v1.2 working plan is consolidated into this V2 record. Future
+  work belongs in `ADR-NEXT.md` and must not silently reopen V2 scope.
+
+## v2 Decision Log
+
+| Date       | Decision                                                     | Reason                                                                                             |
+| ---------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| 2026-07-19 | Keep DevHub local-first and Zed-first                        | Preserve the focused project-hub purpose                                                           |
+| 2026-07-19 | Make Overview the default selected-project workspace         | The first screen should explain the selected project without duplicating catalog navigation        |
+| 2026-07-19 | Keep the project catalog transient                           | Project browsing must not permanently reduce workspace width                                       |
+| 2026-07-19 | Store project selection by stable catalog identity           | Filtering or sorting must never reinterpret the selected row as another project                    |
+| 2026-07-19 | Use compact bottom navigation instead of a vertical rail     | Persistent chrome must stay quiet and preserve the project's own identity                          |
+| 2026-07-19 | Use content-width title pills for project and Git context    | Context should remain scannable without reserving empty title-bar space                            |
+| 2026-07-19 | Preview themes before committing them                        | Appearance selection should be immediate, reversible, and keyboard-first                           |
+| 2026-07-19 | Keep appearance out of Settings                              | One command-palette chooser avoids duplicated state and configuration noise                        |
+| 2026-07-19 | Scope Enter to the focused transient surface                 | A palette action must never fall through into a project launch                                     |
+| 2026-07-19 | Require keyboard-first navigation and a command palette      | Developer speed and discoverability must share one command system                                  |
+| 2026-07-19 | Build a parser-backed Markdown reader                        | README quality directly affects project understanding                                              |
+| 2026-07-19 | Make daily Git workflows fully functional                    | Project understanding and repository action belong together in a developer hub                     |
+| 2026-07-19 | Use system Git before adding a Git library                   | Preserve user configuration and avoid unnecessary dependency weight                                |
+| 2026-07-19 | Load detailed Git data only for the selected project         | Useful context should not become catalog-wide process churn                                        |
+| 2026-07-19 | Require every persistent UI element to justify its presence  | Less information produces a clearer and faster project decision                                    |
+| 2026-07-20 | Refresh only the selected repository automatically           | Local edits and external staging should appear without catalog-wide Git work                       |
+| 2026-07-20 | Poll SSH status only while Git is visible                    | Remote repositories need near-live state without a remote resident agent                           |
+| 2026-07-20 | Keep Fetch and Push explicit                                 | Remote synchronization must never weaken the local-by-default contract                             |
+| 2026-07-20 | Keep branch interaction focused on switching                 | Existing context switching is the project-hub workflow                                             |
+| 2026-07-20 | Restore the last project or show an actionable missing state | Startup must preserve user context without silently selecting the wrong project                    |
+| 2026-07-20 | Keep Git file actions on the change row and context menu     | Frequent actions stay direct while destructive work remains explicit                               |
+| 2026-07-20 | Render syntax-aware unified diffs with line statistics       | Developers can inspect staged and unstaged file changes directly inside DevHub                     |
+| 2026-07-20 | Add a bounded first commit-history slice                     | Developers can browse subjects, authors, dates, hashes, and basic file statistics without checkout |
+| 2026-07-20 | Integrate a multiline commit box with a focused overlay      | Long messages get room without permanently enlarging the Changes pane                              |
+| 2026-07-20 | Give the branch picker a content-specific narrow width       | A short branch list should not inherit command-palette dimensions                                  |
+| 2026-07-20 | Accept a selected-project bottom terminal                    | Short build, test, and Git commands belong with the explicitly selected project                    |
