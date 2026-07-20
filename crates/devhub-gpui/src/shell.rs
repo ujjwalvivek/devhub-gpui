@@ -8,7 +8,13 @@ pub enum Activity {
 }
 
 impl Activity {
-    pub const ALL: [Self; 5] = [Self::Overview, Self::Files, Self::Search, Self::Git, Self::History];
+    pub const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Files,
+        Self::Search,
+        Self::Git,
+        Self::History,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {

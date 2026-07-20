@@ -21,13 +21,13 @@ pub use discovery::{
     ProjectType,
 };
 pub use git::{
-    git_branches_cancellable, git_commit_cancellable, git_diff_cancellable,
-    git_discard_cancellable, git_fetch_cancellable, git_log_cancellable,
-    git_push_cancellable, git_remote_to_github_url, git_stage_all_cancellable, git_stage_cancellable, git_status,
-    git_status_cancellable, git_status_summary_cancellable, git_switch_branch_cancellable,
-    git_unstage_all_cancellable, git_unstage_cancellable, CommitEntry, GitBranch, GitDiffKind,
-    GitError, GitErrorKind, GitFileChange, GitLineStats, GitOperationResult, GitStatus,
-    HISTORY_PAGE_SIZE,
+    git_branches_cancellable, git_commit_cancellable, git_commit_diff_cancellable,
+    git_diff_cancellable, git_discard_cancellable, git_fetch_cancellable, git_log_cancellable,
+    git_push_cancellable, git_remote_to_github_url, git_stage_all_cancellable,
+    git_stage_cancellable, git_status, git_status_cancellable, git_status_summary_cancellable,
+    git_switch_branch_cancellable, git_unstage_all_cancellable, git_unstage_cancellable,
+    CommitEntry, CommitFileChange, GitBranch, GitDiffKind, GitError, GitErrorKind, GitFileChange,
+    GitLineStats, GitOperationResult, GitStatus, HISTORY_PAGE_SIZE,
 };
 pub use persistence::{
     PersistenceEvent, PersistenceFailure, PersistenceOperation, PersistenceRecoverySource,

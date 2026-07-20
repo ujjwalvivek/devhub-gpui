@@ -202,13 +202,24 @@ impl GitFileChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitEntry {
     pub hash: String,
+    pub parents: Vec<String>,
     pub author: String,
+    pub author_email: String,
     pub date: String,
     pub message: String,
-    pub files: Vec<String>,
+    pub refs: Vec<String>,
+    pub files: Vec<CommitFileChange>,
 }
 
-pub const HISTORY_PAGE_SIZE: usize = 100;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFileChange {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub additions: Option<usize>,
+    pub deletions: Option<usize>,
+}
+
+pub const HISTORY_PAGE_SIZE: usize = 25;
 
 pub fn git_log_cancellable(
     project: &Project,
@@ -224,8 +235,10 @@ pub fn git_log_cancellable(
         count,
         "--skip".into(),
         skip_str,
-        "--format=%H||%an||%ai||%s".into(),
+        "--date=format:%d %b %Y %H:%M".into(),
+        "--format=%x1e%H%x00%P%x00%an%x00%ae%x00%ad%x00%B%x00%(decorate:prefix=,suffix=,separator=%x1f,tag=tag: )%x00".into(),
         "--numstat".into(),
+        "-z".into(),
     ];
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = run_git(project, &refs, CommandClass::Local, cancellation)?;
@@ -233,54 +246,81 @@ pub fn git_log_cancellable(
 }
 
 fn parse_commit_log(output: &[u8]) -> Result<Vec<CommitEntry>, GitError> {
-    let text = std::str::from_utf8(output)
-        .map_err(|_| GitError::new(GitErrorKind::CommandFailed, "Git log output is not UTF-8"))?;
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
     let mut commits = Vec::new();
-    let mut current_hash: Option<String> = None;
-    let mut current_author: Option<String> = None;
-    let mut current_date: Option<String> = None;
-    let mut current_message: Option<String> = None;
-    let mut current_files: Vec<String> = Vec::new();
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    for record in output
+        .split(|byte| *byte == 0x1e)
+        .filter(|record| !record.is_empty())
+    {
+        let mut fields = record.split(|byte| *byte == 0);
+        let Some(hash) = fields.next().filter(|field| !field.is_empty()) else {
             continue;
+        };
+        let parents = field_text(fields.next())
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let author = field_text(fields.next());
+        let author_email = field_text(fields.next());
+        let date = field_text(fields.next());
+        let message = field_text(fields.next()).trim().to_string();
+        let refs = field_text(fields.next())
+            .split('\x1f')
+            .filter(|reference| !reference.is_empty())
+            .map(str::to_string)
+            .collect();
+        let mut file_fields = fields.filter(|field| !field.is_empty()).peekable();
+        let mut files = Vec::new();
+        while let Some(stat) = file_fields.next() {
+            let mut parts = stat.splitn(3, |byte| *byte == b'\t');
+            let additions = parse_numstat_value(parts.next());
+            let deletions = parse_numstat_value(parts.next());
+            let Some(path) = parts.next() else {
+                continue;
+            };
+            let (original_path, path) = if path.is_empty() {
+                let Some(original) = file_fields.next() else {
+                    break;
+                };
+                let Some(path) = file_fields.next() else {
+                    break;
+                };
+                (Some(field_text(Some(original))), field_text(Some(path)))
+            } else {
+                (None, field_text(Some(path)))
+            };
+            files.push(CommitFileChange {
+                path,
+                original_path,
+                additions,
+                deletions,
+            });
         }
-        if trimmed.contains("||") {
-            if let Some(hash) = current_hash.take() {
-                commits.push(CommitEntry {
-                    hash,
-                    author: current_author.take().unwrap_or_default(),
-                    date: current_date.take().unwrap_or_default(),
-                    message: current_message.take().unwrap_or_default(),
-                    files: std::mem::take(&mut current_files),
-                });
-            }
-            let parts: Vec<&str> = trimmed.splitn(4, "||").collect();
-            if parts.len() >= 4 {
-                current_hash = Some(parts[0].to_string());
-                current_author = Some(parts[1].to_string());
-                current_date = Some(parts[2].to_string());
-                current_message = Some(parts[3].to_string());
-            }
-        } else if current_hash.is_some() {
-            current_files.push(line.to_string());
-        }
-    }
-    if let Some(hash) = current_hash {
         commits.push(CommitEntry {
-            hash,
-            author: current_author.unwrap_or_default(),
-            date: current_date.unwrap_or_default(),
-            message: current_message.unwrap_or_default(),
-            files: current_files,
+            hash: String::from_utf8_lossy(hash).into_owned(),
+            parents,
+            author,
+            author_email,
+            date,
+            message,
+            refs,
+            files,
         });
     }
     Ok(commits)
+}
+
+fn field_text(field: Option<&[u8]>) -> String {
+    field
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default()
+        .into_owned()
+}
+
+fn parse_numstat_value(value: Option<&[u8]>) -> Option<usize> {
+    let value = value?;
+    (value != b"-")
+        .then(|| std::str::from_utf8(value).ok()?.parse().ok())
+        .flatten()
 }
 
 pub fn git_remote_to_github_url(remote: &str, hash: &str) -> Option<String> {
@@ -423,6 +463,47 @@ pub fn git_diff_cancellable(
     let output = run_git(project, &args, CommandClass::Local, cancellation)?;
     String::from_utf8(output.stdout)
         .map_err(|_| GitError::new(GitErrorKind::CommandFailed, "Git diff is not valid UTF-8"))
+}
+
+pub fn git_commit_diff_cancellable(
+    project: &Project,
+    commit: &str,
+    path: &str,
+    cancellation: &CancellationToken,
+) -> Result<String, GitError> {
+    if commit.is_empty() || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GitError::new(
+            GitErrorKind::Validation,
+            "Commit hash is invalid",
+        ));
+    }
+    if path.is_empty() {
+        return Err(GitError::new(
+            GitErrorKind::Validation,
+            "Commit file path is empty",
+        ));
+    }
+    let output = run_git(
+        project,
+        &[
+            "show",
+            "--format=",
+            "--find-renames",
+            "--no-ext-diff",
+            "--no-color",
+            commit,
+            "--",
+            path,
+        ],
+        CommandClass::Local,
+        cancellation,
+    )?;
+    String::from_utf8(output.stdout).map_err(|_| {
+        GitError::new(
+            GitErrorKind::CommandFailed,
+            "Commit diff is not valid UTF-8",
+        )
+    })
 }
 
 pub fn git_stage_cancellable(
@@ -1138,6 +1219,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_nul_delimited_commit_history_without_display_delimiter_collisions() {
+        let output = b"\x1eabc123\0parent1 parent2\0A||B\0a@example.com\x0020 Jul 2026 15:14\0subject\nbody\0HEAD -> main\x1forigin/main\0\0\
+12\t3\tsrc/a||b\n.rs\0-\t-\timage.png\x001\t2\t\0old.rs\0new.rs\0";
+
+        let commits = parse_commit_log(output).unwrap();
+
+        assert_eq!(commits.len(), 1);
+        let commit = &commits[0];
+        assert_eq!(commit.hash, "abc123");
+        assert_eq!(commit.parents, ["parent1", "parent2"]);
+        assert_eq!(commit.author, "A||B");
+        assert_eq!(commit.author_email, "a@example.com");
+        assert_eq!(commit.message, "subject\nbody");
+        assert_eq!(commit.refs, ["HEAD -> main", "origin/main"]);
+        assert_eq!(commit.files[0].path, "src/a||b\n.rs");
+        assert_eq!(
+            (commit.files[0].additions, commit.files[0].deletions),
+            (Some(12), Some(3))
+        );
+        assert_eq!(
+            (commit.files[1].additions, commit.files[1].deletions),
+            (None, None)
+        );
+        assert_eq!(commit.files[2].original_path.as_deref(), Some("old.rs"));
+        assert_eq!(commit.files[2].path, "new.rs");
+    }
+
+    #[test]
     fn parses_branch_list_with_current_marker() {
         let branches = parse_branches(b" \tfeature\0*\tmain\0").unwrap();
         assert_eq!(
@@ -1297,6 +1406,56 @@ mod tests {
     }
 
     #[test]
+    fn loads_typed_history_and_commit_file_patches() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let root = test_directory("git-history");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        run_test_git(&root, &["init", "-q"]);
+        run_test_git(&root, &["config", "user.name", "DevHub Test"]);
+        run_test_git(&root, &["config", "user.email", "devhub@example.invalid"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        std::fs::write(root.join("image.bin"), [0, 1, 2, 3]).unwrap();
+        run_test_git(&root, &["add", "."]);
+        run_test_git(
+            &root,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "history subject",
+                "-m",
+                "history body",
+            ],
+        );
+
+        let project = test_project(root.clone());
+        let cancellation = CancellationToken::new();
+        let commits = git_log_cancellable(&project, 25, 0, &cancellation).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].author, "DevHub Test");
+        assert_eq!(commits[0].author_email, "devhub@example.invalid");
+        assert!(commits[0].message.contains("history body"));
+        assert!(commits[0]
+            .refs
+            .iter()
+            .any(|reference| reference.starts_with("HEAD")));
+        assert!(commits[0]
+            .files
+            .iter()
+            .any(|file| file.path == "image.bin" && file.additions.is_none()));
+
+        let patch =
+            git_commit_diff_cancellable(&project, &commits[0].hash, "tracked.txt", &cancellation)
+                .unwrap();
+        assert!(patch.contains("+one"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn unstaging_works_before_the_first_commit() {
         if Command::new("git").arg("--version").output().is_err() {
             return;
@@ -1369,10 +1528,7 @@ mod tests {
 
     #[test]
     fn converts_https_remote_to_github_url() {
-        let url = git_remote_to_github_url(
-            "https://github.com/user/repo.git",
-            "abc123def456",
-        );
+        let url = git_remote_to_github_url("https://github.com/user/repo.git", "abc123def456");
         assert_eq!(
             url,
             Some("https://github.com/user/repo/commit/abc123def456".into())
@@ -1381,10 +1537,7 @@ mod tests {
 
     #[test]
     fn converts_ssh_remote_to_github_url() {
-        let url = git_remote_to_github_url(
-            "git@github.com:user/repo.git",
-            "abc123",
-        );
+        let url = git_remote_to_github_url("git@github.com:user/repo.git", "abc123");
         assert_eq!(
             url,
             Some("https://github.com/user/repo/commit/abc123".into())
@@ -1393,10 +1546,7 @@ mod tests {
 
     #[test]
     fn converts_git_protocol_remote_to_github_url() {
-        let url = git_remote_to_github_url(
-            "git://github.com/user/repo.git",
-            "abc123",
-        );
+        let url = git_remote_to_github_url("git://github.com/user/repo.git", "abc123");
         assert_eq!(
             url,
             Some("https://github.com/user/repo/commit/abc123".into())
@@ -1405,10 +1555,7 @@ mod tests {
 
     #[test]
     fn converts_ssh_url_protocol_remote_to_github_url() {
-        let url = git_remote_to_github_url(
-            "ssh://git@github.com/user/repo.git",
-            "abc123",
-        );
+        let url = git_remote_to_github_url("ssh://git@github.com/user/repo.git", "abc123");
         assert_eq!(
             url,
             Some("https://github.com/user/repo/commit/abc123".into())
@@ -1417,19 +1564,13 @@ mod tests {
 
     #[test]
     fn returns_none_for_non_github_remote() {
-        let url = git_remote_to_github_url(
-            "https://gitlab.com/user/repo.git",
-            "abc123",
-        );
+        let url = git_remote_to_github_url("https://gitlab.com/user/repo.git", "abc123");
         assert_eq!(url, None);
     }
 
     #[test]
     fn handles_remote_without_dot_git_suffix() {
-        let url = git_remote_to_github_url(
-            "https://github.com/user/repo",
-            "abc123",
-        );
+        let url = git_remote_to_github_url("https://github.com/user/repo", "abc123");
         assert_eq!(
             url,
             Some("https://github.com/user/repo/commit/abc123".into())
