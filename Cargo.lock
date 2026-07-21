@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "devhub-core"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "directories",
  "ignore",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "devhub-gpui"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "devhub-core",
  "devhub-mcp",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "devhub-mcp"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "axum",
  "devhub-core",
