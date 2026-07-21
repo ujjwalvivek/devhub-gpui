@@ -130,7 +130,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
             Write-Warning 'Windows signing certificate is not configured; artifacts will be unsigned.'
             exit 0
-          fi
+          }
 
           $certificatePath = Join-Path $env:RUNNER_TEMP 'devhub-signing.pfx'
           [IO.File]::WriteAllBytes(
@@ -183,7 +183,7 @@ jobs:
           if (-not $iscc) {
             $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
             if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 was not found.' }
-          fi
+          }
 
           & $iscc "/DAppVersion=$version" "/DSourceDir=$source" "/DOutputDir=$output" `
             "/DSetupIcon=$($icon.FullName)" 'packaging\windows\DevHub.iss'
@@ -233,13 +233,14 @@ jobs:
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
             --output "$tools/appimagetool.AppImage"
           chmod +x "$tools"/*.AppImage
+          install -Dm644 crates/devhub-gpui/assets/appicon.svg "$tools/devhub-gpui.svg"
 
           "$tools/linuxdeploy.AppImage" --appimage-extract-and-run \
             --appdir "$appdir" \
             --executable "target/${{ matrix.target }}/release/${{ matrix.executable }}" \
             --executable "target/${{ matrix.target }}/release/${{ matrix.mcp_executable }}" \
             --desktop-file packaging/linux/devhub-gpui.desktop \
-            --icon-file crates/devhub-gpui/assets/appicon.svg
+            --icon-file "$tools/devhub-gpui.svg"
 
           rm -f "$appdir/AppRun" "$appdir/.DirIcon"
           install -Dm755 packaging/linux/AppRun "$appdir/AppRun"
