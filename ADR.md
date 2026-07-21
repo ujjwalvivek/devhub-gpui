@@ -1824,3 +1824,450 @@ editor handoff, long content, and every loading/empty/error/cancelled state.
 | 2026-07-20 | Integrate a multiline commit box with a focused overlay      | Long messages get room without permanently enlarging the Changes pane                              |
 | 2026-07-20 | Give the branch picker a content-specific narrow width       | A short branch list should not inherit command-palette dimensions                                  |
 | 2026-07-20 | Accept a selected-project bottom terminal                    | Short build, test, and Git commands belong with the explicitly selected project                    |
+
+## v2 Extension Development
+
+| Field     | Value                                                          |
+| --------- | -------------------------------------------------------------- |
+| Status    | Accepted working plan                                          |
+| Date      | 2026-07-20                                                     |
+| Baseline  | Consolidated V2 product record in `ADR.md`                     |
+| Target    | v3                                                             |
+| Direction | A trustworthy project home with read-only project intelligence |
+
+## Decision
+
+V3 will make the existing project-hub workflow more dependable, more precise,
+and easier to carry across supported platforms. It is not permission to add a
+new collection of panels.
+
+The product remains the place to answer five questions:
+
+1. Which project should I open?
+2. What state is it in?
+3. Can I complete the small project, Git, or terminal task here?
+4. Which editor should receive the project when sustained work begins?
+5. How is this project put together?
+
+V3 succeeds when these answers are fast and unsurprising across local and SSH
+projects. A feature is not accepted because another developer tool has it. It
+must shorten a repeated DevHub workflow and fit the existing shell without
+adding persistent noise.
+
+## Product Contract
+
+DevHub remains:
+
+- Local by default. Cached catalog, local files, README, local Git, and local
+  editor handoff work without a network.
+- Networked only on command. SSH browsing, remote terminals, Fetch, Push, and
+  external links are explicit actions.
+- Project intelligence is exposed read-only through an explicit MCP server. A
+  headless stdio binary serves local editors without the application running;
+  an in-app HTTP server on 127.0.0.1 starts only from the status-strip toggle
+  and serves the same read-only tools. DevHub stores no provider key, fetches
+  no model catalog, and implements no inference client. When the server is
+  off, no listener exists.
+- Project-centered. The selected project owns Files, Search, Git, History,
+  terminal, and editor context.
+- Keyboard-first. Every frequent action is reachable through focused
+  navigation or the command palette, with pointer and keyboard paths invoking
+  the same command.
+- Read-oriented. DevHub may inspect and manage a repository, but it does not
+  become a general source editor.
+- Quiet. Persistent UI is limited to current context, navigation, and
+  actionable status.
+
+Zed remains the primary handoff. The detected `Open in` launcher is a useful
+secondary path, not a replacement for stable editor-specific behavior.
+
+## V2 Baseline
+
+V3 starts from the current V2 implementation, including:
+
+- Transient project catalog and title-bar project switcher
+- Overview, Files, Search, Git, and History workspaces
+- Command palette and live theme selection
+- Parser-backed README preview and shared raw/source viewer
+- Local and SSH discovery, reading, search, Git, and terminal routing
+- Flat/tree Git changes, line totals, per-file actions, semantic diffs, commit,
+  branch switching, Fetch, and Push
+- Selected-repository automatic status refresh without automatic origin access
+- Commit graph/history with 25-item scroll pagination, compact details,
+  changed-file tree, and commit file diff
+- One explicit selected-project terminal with PTY input, resize, scrollback,
+  pinning, and lifecycle ownership
+- Metadata-driven local/remote editor launcher with project-aware JetBrains
+  filtering
+
+These are baseline behavior, not V3 feature proposals. Regressions in them are
+P0 defects.
+
+## Feature Admission
+
+A new V3 item must satisfy all of the following:
+
+1. It solves an observed repeated task or a demonstrated reliability defect.
+2. Its outcome can be stated without referring to internal architecture.
+3. It has a clear local and SSH behavior, including when the network is absent.
+4. Its loading, empty, error, cancellation, and process-exit states are known.
+5. It fits an existing workspace, launcher, command, or contextual detail
+   surface.
+6. It does not add catalog-wide work or a permanent control when selected-task
+   work is sufficient.
+7. It has an executable or native acceptance gate.
+
+Items failing this test stay out of the roadmap.
+
+## P0: V2 Trust Boundary
+
+P0 closes the gap between a feature existing and the feature being safe to use
+through a full development day.
+
+### P0-001: Process ownership
+
+- Editor handoff never opens a console or terminal window.
+- Editor processes receive no inherited stdin, stdout, or stderr.
+- On Windows, editor handoff uses `CREATE_NO_WINDOW`.
+- The DevHub terminal starts only through the terminal command.
+- Project switching, pinning, collapse, close, child exit, SSH disconnect, and
+  application exit follow the terminal ownership contract in `ADR.md`.
+- Every cancelled managed process is terminated and reaped.
+
+### P0-002: Project identity and stale state
+
+- Selection remains attached to path plus source host across filtering,
+  sorting, scanning, and startup restore.
+- Missing remembered projects show one repair/remove state.
+- Switching projects invalidates stale README, tree, file, search, Git,
+  history, diff, and unpinned terminal results.
+- Background completion from the previous project cannot replace current
+  content.
+
+### P0-003: Git safety
+
+- Stage, unstage, discard, commit, switch, Fetch, and Push preserve selection
+  and commit text on failure.
+- Destructive actions identify the affected path and require confirmation.
+- Automatic refresh never executes a network-class command.
+- Credential, signing, hook, conflict, detached-HEAD, and missing-upstream
+  failures remain concise and actionable.
+- Arbitrary spaces, Unicode, tabs, renames, binary files, and unborn branches
+  are covered by fixtures.
+
+### P0-004: Release truth
+
+- `README.md`, `ADR.md`, release notes, and UI text describe only validated
+  behavior.
+- No working-tree-only behavior is presented as a published release.
+- The full static gate and native review pass before a version or release claim
+  changes.
+
+P0 blocks all V3 feature work when a data-loss risk, involuntary process,
+incorrect project identity, or false release claim is open.
+
+## P1: V3 Product Work
+
+P1 improves the workflows already earning daily space in DevHub.
+
+### P1-001: Project understanding
+
+Overview keeps only information useful before opening the project:
+
+- README preview or raw source
+- Project path and source
+- Current branch and concise dirty state
+- Latest commit subject/time when already loaded
+- One primary Zed handoff and the secondary detected-editor launcher
+
+Project type detection and editor compatibility use the complete discovered
+marker set, including mixed-language repositories. Unknown types remain
+unknown; weak evidence must not produce confident labels or irrelevant
+JetBrains entries.
+
+### P1-002: Markdown fidelity without media loading
+
+Improve the existing parser-backed reader through fixtures and presentation,
+not through a browser or a second rendering stack.
+
+Required coverage:
+
+- Nested ordered/unordered/task lists
+- Tables with bounded horizontal overflow
+- Fenced code and language highlighting
+- Block quotes, links, strikethrough, Unicode, and long tokens
+- Predictable degradation for raw HTML
+- Large-document scrolling and selection
+- Raw/preview focus and scroll behavior
+
+Images and media remain offline placeholders or explicit links. V3 does not
+load local or remote README media automatically.
+
+### P1-003: Git workflow fidelity
+
+Polish the existing Git workflow rather than expanding into every Git command:
+
+- External local changes appear after the existing debounce.
+- SSH status updates only while Git is visible and never contacts origin.
+- Diff selection survives refresh when the same file still exists.
+- Conflict, binary, rename, delete, long-line, and large-diff states remain
+  readable and bounded.
+- History graph lanes and ref labels remain correct for merges and pagination.
+- Commit details, file tree, and file diff remain available without replacing
+  or losing the history list.
+- The commit composer remains compact while accepting at least two visible
+  lines and preserving the complete message.
+
+### P1-004: Terminal fidelity
+
+- Default shell detection is platform-native and never relies on Windows
+  `COMSPEC` as the preferred shell.
+- Local sessions start in the exact selected project directory.
+- SSH sessions start in the exact validated remote project directory.
+- Resize updates both rendered cells and the underlying PTY.
+- Clear, scrollback, Nerd Font glyphs, ANSI color, paste, control keys,
+  navigation keys, and focus containment pass native review.
+- An unpinned session survives collapse but ends on project change. A pinned
+  session keeps its visible owner until explicitly closed.
+
+### P1-005: Editor handoff fidelity
+
+- Discovery uses operating-system application metadata and committed parser
+  logic, never machine-specific editor paths.
+- Zed is excluded from `Open in` because it already has the primary action.
+- General-purpose editors may serve all detected project types.
+- JetBrains products appear only for compatible project language families.
+- Remote entries appear only when product metadata and transport support prove
+  an SSH launch path.
+- Launch failure stays in DevHub as concise status and never falls back to an
+  arbitrary Documents folder or restricted blank project.
+
+### P1-006: Cross-platform behavior
+
+Windows, macOS, and Linux use the same product contract with platform-specific
+process and application discovery behind narrow boundaries.
+
+Native acceptance covers:
+
+- Local editor discovery and launch
+- Remote-capable editor filtering and launch
+- Default shell selection and terminal input
+- Window controls and compact/wide layout
+- Local and SSH Git process behavior
+- Configuration and cache paths
+
+Unsupported platform behavior must be explicit. Silent fallback to a different
+folder, shell, editor, or network action is a defect.
+
+### P1-007: Measured responsiveness
+
+Measure before adding caches, indexes, workers, or virtualization layers.
+
+The acceptance catalog contains 100, 500, and 1,000 projects. Measure startup
+from cache, project filtering, picker navigation, switching, README display,
+Git refresh, and History pagination. Optimization is accepted only with a
+reproducible before/after result and no stale-state regression.
+
+### P1-008: Read-only project intelligence over MCP, and pre-handoff todos
+
+V3 replaces the V2 Ask Project panel and its OpenCode provider with a
+read-only Model Context Protocol surface plus a lightweight per-project todo
+panel. DevHub implements no chat interface, no inference client, no provider
+key storage, and no model catalog. Clients bring their own models and agents;
+DevHub supplies bounded project evidence.
+
+Todo panel:
+
+- The right-side panel slot formerly used by Ask Project becomes a
+  per-project todo list: pre-handoff brain context for the user.
+- Items are stored in a versioned `todos.toml` in the platform application
+  data directory, keyed by project path and source host. Nothing is written
+  into repositories; SSH projects need no remote writes.
+- V1 scope: item text, done state, insertion order; add, toggle, delete.
+  Completed items sink and render struck through.
+- The panel replaces the Ask panel slot and width state, toggles with
+  `ctrl-shift-t`, is closed by default, and is not a separate workspace.
+
+MCP server:
+
+- The same read-only tools are served in two shapes. A headless `devhub-mcp`
+  stdio binary links devhub-core only, loads the same configuration, cache,
+  and todos, and is spawned by MCP clients such as Zed. An in-app HTTP server
+  binds 127.0.0.1 only, starts and stops from a status-strip toggle, and
+  shares the tool layer. Tailnet or internet exposure is delegated to the
+  network layer (for example `tailscale serve`); DevHub has no
+  overlay-network awareness.
+- An optional `mcp_auth_token` configuration value, when set, requires an
+  `Authorization: Bearer` header on HTTP requests. It exists solely for
+  internet exposure and is empty by default.
+- All tools are read-only and bounded, and reuse the existing local and SSH
+  tree, read, search, and Git paths with cancellation. Tool descriptions mark
+  live SSH reads as network round-trips. `project_overview` includes one live
+  bounded Git state call.
+- Tool results carry structured path and line references plus the content
+  itself; clients and editors own presentation. No deep-link or in-app
+  citation navigation is implemented.
+- Catalog answers come from the on-disk cache and stamp `catalog_as_of`;
+  project content answers are computed live. A headless stdio session is
+  therefore as capable as the running application, with catalog membership as
+  fresh as the last scan.
+- Every tool call appends to a bounded JSONL activity log in the application
+  data directory. The status-strip indicator shows server state and opens a
+  recent-activity overlay. Both server shapes write the log, so stdio
+  activity is visible in the next application session.
+- V1 tool inventory: `list_projects`, `project_overview`, `list_tree`,
+  `read_file`, `search_content`, `git_status`, `git_diff`, `git_log`, and
+  `list_todos` (read-only). Write tools are uncommitted P2 candidates.
+
+Architecture diagrams (the GitDiagram port) are deferred, not cancelled; the
+chat panel that hosted them no longer exists.
+
+## P2: Evidence-Required Candidates
+
+These are not committed V3 features:
+
+- Git worktree creation or management
+- Multiple simultaneous terminal sessions per project
+- Persistent full-repository content indexing
+- Arbitrary commit snapshot browsing beyond the selected commit details
+- User-defined editor executable mappings when metadata discovery fails
+- More project metadata, dashboard summaries, or status badges
+
+A P2 item moves to P1 only after normal use demonstrates repeated friction and
+the smallest useful interaction is agreed first.
+
+## P3: Outside V3
+
+- A general-purpose code editor or merge editor
+- Automatic Fetch, Pull, Push, cloning, or repository mutation
+- Catalog-wide Git polling or background network activity
+- Automatic README image, video, or remote asset loading
+- Cloud project catalogs, DevHub accounts, project synchronization, or telemetry
+- AI inference providers, API-key storage, model catalogs, chat interfaces,
+  local model runtimes, or a DevHub-hosted inference service
+- Autonomous agents, repository edits, model-triggered terminal commands,
+  model-triggered Git mutation, or MCP write tools
+- Plugin ecosystems or extension marketplaces
+- Reimplementing the Git object database or credential system
+- Adding UI simply to match Zed, VS Code, or a JetBrains product
+
+These items require a new product decision, not opportunistic implementation.
+
+## Milestones
+
+### Milestone 0: V2 audit
+
+- Reconcile implementation, `ADR.md`, `ADR-NEXT.md`, README, and release state.
+- Run the full static validation gate.
+- Record native gaps without converting them into speculative features.
+
+Gate: the baseline is truthful and every open P0 defect has an owner and a
+reproduction.
+
+### Milestone 1: Lifecycle and identity
+
+- Complete P0-001 through P0-003.
+- Test editor launch, terminal ownership, project switching, cancellation, and
+  stale async completion locally and over SSH.
+
+Gate: no action starts an unintended terminal/process, no old project result
+appears in the new project, and Git failures preserve user state.
+
+### Milestone 2: Reading and repository fidelity
+
+- Complete P1-001 through P1-004.
+- Review compact and wide layouts in every theme family.
+- Exercise representative Markdown and Git fixtures.
+
+Gate: project understanding, README reading, Git, History, and terminal work
+remain coherent through long content and failure states.
+
+### Milestone 3: Handoff and platform review
+
+- Complete P1-005 and P1-006.
+- Validate installed editor discovery without hardcoded local paths.
+- Validate local and remote launch behavior on supported release platforms.
+
+Gate: the same command opens the intended project in an eligible editor without
+an extra console, wrong folder, or silent fallback.
+
+### Milestone 4: Todo panel and MCP intelligence
+
+- Remove the V2 Ask Project panel, OpenCode provider, credential storage, and
+  their dependencies.
+- Implement the versioned per-project todo store and the side panel.
+- Implement the read-only tool layer over existing local/SSH paths.
+- Implement the `devhub-mcp` stdio binary and the in-app HTTP server with
+  status-strip toggle, optional bearer token, and activity log.
+
+Gate: tools answer from cache plus live bounded reads, every call is
+read-only and logged, server-off means no listener, SSH tools behave under
+latency and cancellation, and no inference or credential code remains.
+
+### Milestone 5: Performance and v3 release
+
+- Complete P1-007 and P1-008.
+- Run static, native, clean-install, and release-artifact validation.
+- Update public documentation only after evidence exists.
+
+Gate: no open P0/P1 item, no unexplained UI stall, no unintended network or
+child process, and no release claim unsupported by validation.
+
+## Validation
+
+Static gate:
+
+```powershell
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --release --workspace --locked
+```
+
+Native matrix:
+
+- Compact and wide windows
+- Every dark/light theme choice and system appearance
+- Keyboard-only project, command, theme, branch, editor, and history launchers
+- Local and SSH projects
+- Clean, dirty, detached, unborn, conflict, and unavailable Git repositories
+- Terminal open, input, clear, resize, collapse, pin, project switch, exit, and
+  disconnect
+- Editor discovery and launch with no console window
+- Long paths, project names, branches, commit subjects, code lines, and errors
+- Loading, empty, partial, cancelled, success, and failure states
+- Todo add, toggle, delete, persistence across restarts, project switching,
+  SSH projects, done-item ordering, and empty state
+- `devhub-mcp` stdio session with a real client against local and SSH
+  projects; tool bounding, binary refusal, cancellation, and cold-cache
+  behavior
+- HTTP server toggle on/off, 127.0.0.1 binding, no listener when off,
+  bearer-token rejection and acceptance, activity-log content from both
+  server shapes, and tailnet exposure through `tailscale serve`
+
+## Decision Log
+
+| Date       | Decision                                                 | Reason                                                                                                          |
+| ---------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 2026-07-20 | Treat V2 as the v3 baseline, not an open feature backlog | Prevent completed work from being repeatedly redesigned                                                         |
+| 2026-07-20 | Make process ownership and project identity P0           | Involuntary terminals and stale cross-project state break trust                                                 |
+| 2026-07-20 | Keep network work explicit                               | Local-first describes default behavior, not the absence of SSH or Git remotes                                   |
+| 2026-07-20 | Keep README media offline                                | Predictable reading matters more than automatic media loading                                                   |
+| 2026-07-20 | Improve existing Git depth before adding commands        | The daily repository loop has more value than feature-count parity                                              |
+| 2026-07-20 | Detect editors from platform/product metadata            | Machine-specific paths and generic native pickers launch the wrong targets                                      |
+| 2026-07-20 | Filter specialized IDEs by project evidence              | An editor entry earns its place only when it can serve the selected project                                     |
+| 2026-07-20 | Require measured evidence for performance architecture   | Catalog size alone does not justify indexing or background complexity                                           |
+| 2026-07-20 | Keep P2 explicitly uncommitted                           | Candidate ideas must not silently become roadmap promises                                                       |
+| 2026-07-20 | Add read-only natural-language project intelligence      | Project understanding is the most valuable missing hub workflow                                                 |
+| 2026-07-20 | Use only OpenCode Zen and Go for V3 inference            | One provider and one key keep setup and implementation bounded                                                  |
+| 2026-07-20 | Port GitDiagram's validated generation shape locally     | Diagrams should understand local and SSH projects without embedding a web app                                   |
+| 2026-07-20 | Persist bounded project context locally                  | Reopening an unchanged project should not repeat repository analysis                                            |
+| 2026-07-21 | Replace Ask Project with read-only MCP tools             | The chat harness was the unmaintainable part; retrieval already works and external agents orchestrate it better |
+| 2026-07-21 | Delete the OpenCode provider and credential storage      | With MCP, clients bring their own models; DevHub stores no keys                                                 |
+| 2026-07-21 | Serve tools as a stdio binary plus in-app localhost HTTP | stdio works with the app closed; HTTP is toggle-explicit and overlay exposure stays outside the app             |
+| 2026-07-21 | Repurpose the side panel as a per-project todo list      | Pre-handoff context earns the slot the chat panel vacates                                                       |
+| 2026-07-21 | Defer architecture diagrams                              | Diagram generation lost its host surface when the panel was removed                                             |
+| 2026-07-21 | Replace MCP status indicator with an SVG icon button     | Matches other status-bar buttons and adds tooltip for left/right click actions                                  |
+| 2026-07-21 | Use auto-grow multi-line input for the todo text field   | Wraps long text and grows vertically instead of overflowing horizontally                                        |
+| 2026-07-21 | Submit todo on Shift+Enter in multi-line input           | Enter inserts newline; Shift+Enter adds the todo item, consistent with textarea convention                      |

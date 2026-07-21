@@ -10,6 +10,7 @@ A local-first project hub for local and SSH repositories, built in Rust with GPU
 - Run one project-rooted local or SSH terminal that survives panel collapse.
 - Open projects directly in Zed or another compatible detected editor.
 - Navigate common workflows from the keyboard and command palette.
+- Devhub MCP server helps bring your projects KB everywhere along with you.
 
 Local files, cached projects, and repository-local Git work stay offline. SSH, Fetch, Push, and external links use the network only when requested. README media is not loaded automatically.
 
