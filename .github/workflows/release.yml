@@ -266,7 +266,15 @@ jobs:
           test -L "$appdir/.DirIcon"
           test -x "$appdir/usr/bin/devhub-gpui"
           test -x "$appdir/usr/bin/devhub-mcp"
-          "$output" --appimage-extract-and-run --mcp-stdio </dev/null
+          smoke_output=$(
+            printf '%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' |
+              "$output" --appimage-extract-and-run --mcp-stdio
+          )
+          grep -F '"id":1,"result"' <<< "$smoke_output"
+          grep -F '"id":2,"result":{"tools":[' <<< "$smoke_output"
 
       - name: Import macOS signing certificate
         if: runner.os == 'macOS'
