@@ -7,9 +7,18 @@
 
 ## Config Paths
 
-`config.toml`: %AppData%\Roaming\devhub-gpui\config\config.toml
+Windows:
 
-`projects.toml`: %AppData%\Local\devhub-gpui\cache\projects.toml
+- `config.toml`: `%AppData%\Roaming\devhub-gpui\config\config.toml`
+- `projects.toml`: `%AppData%\Local\devhub-gpui\cache\projects.toml`
+
+Linux:
+
+- `config.toml`: `${XDG_CONFIG_HOME:-~/.config}/devhub-gpui/config.toml`
+- `projects.toml`: `${XDG_CACHE_HOME:-~/.cache}/devhub-gpui/projects.toml`
+
+`DEVHUB_GPUI_STATE_DIR` overrides both platforms, using
+`<override>/config/config.toml` and `<override>/cache/projects.toml`.
 
 ## Optional future enhancements and platform limits
 
@@ -21,11 +30,27 @@ investments or explicit platform boundaries.
 | Per-source scan status and errors      | Low        | ScanModel already tracks aggregate state; per-source tracking needs per-root error/result fields and UI per-project-row indicators                                                                  |
 | Manual refresh per root or host        | Medium     | Requires source-level refresh button and per-source cancellation routing; the cancellation infrastructure now exists                                                                                |
 | Global full-text search index (`grep`) | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query — a significant standalone feature                                                                             |
-| SSH requires a POSIX/GNU remote        | N/A        | Hard platform limitation: remote scripts depend on `sh`, `find`, `grep`, `stat`, `wc`, `head`, `cat`; Git provides metadata and ignore parity. SFTP and PowerShell-only servers remain unsupported. |
+| SSH host command environment           | N/A        | POSIX hosts use standard shell tools. Windows hosts require PowerShell plus Git for Windows, whose bundled `sh`, `find`, `grep`, `stat`, `wc`, `head`, and `cat` run the same bounded scripts. SFTP-only and Windows hosts without Git for Windows remain unsupported. |
 
 ## Status
 
-- Current stage: DevHub-GPUI v1.1.0 complete within the approved functional-parity scope:
+- Current stage: DevHub-GPUI v2.1.1 — project hub with Git, terminal, command
+  palette, IDE detection, MCP project intelligence, and todo list
+  - Git integration: branch picker, unified diffs, commit history, commit box,
+  commit graph, staged/unstaged file actions, Fetch, Push
+  - Embedded pseudo-terminal per project with PTY, resize, scrollback, pinning,
+  lifecycle ownership, and SSH routing
+  - Recoverable persistence with atomic backups, writer locking, startup
+  recovery, stale-recovery conflict detection
+  - Metadata-driven editor launcher: auto-detect IDEs from platform metadata,
+  filter JetBrains entries by project evidence
+  - Command palette with keyboard-first navigation and live theme preview
+  - Read-only MCP server (`devhub-mcp` crate): stdio binary for external agents
+    + in-app loopback HTTP server with toggle and required bearer token auth
+  - Per-project todo list persisted across restarts, SSH projects included
+  - The old OpenCode chat harness and credential storage were deleted — MCP
+  clients bring their own models
+- Completed stage: DevHub-GPUI v1.1.0 complete within the approved functional-parity scope:
   - Local + SSH discovery, tree, read, README, search
   - Cancellation of all in-flight operations (scan, tree, file, readme, search)
   - Remote `.gitignore` semantics via `git check-ignore` over SSH
@@ -166,6 +191,34 @@ investments or explicit platform boundaries.
   every archive and is used verbatim as the tagged GitHub release body.
 - Source application: `[REDACTED]\devhub` (read-only)
 - Target platform for the first working build: native Windows
+- Recovery and persistence hardening on 2026-07-19: typed diagnostics
+  (Diagnostic, Severity, PersistDiagnostic), concurrent bounded SSH stream
+  draining with `drain_to_end`, and a `ChildKiller` that terminates orphans
+  on project switch and app exit. Config/cache persistence uses atomic backups,
+  unique temp files, startup recovery, writer locking, and stale-recovery
+  conflict detection. All 87 tests pass.
+- V2 baseline on 2026-07-20: full Git integration (branch picker, semantic
+  diffs, commit history, commit box, commit graph, staged/unstaged actions,
+  Fetch, Push), embedded pseudo-terminal, metadata-driven IDE launcher with
+  project-aware JetBrains filtering, command palette, live theme preview, and
+  the restored-project-on-startup UX. All 105 tests pass.
+- Pipeline validation on 2026-07-20: the full static gate passes at 105 tests,
+  the native gate covers compact/wide windows, every theme, keyboard-only
+  navigation, local and SSH projects, all Git repository states, terminal
+  workflows, editor discovery, long paths, and every loading/empty/error/
+  success/cancelled state.
+- V2.1.0 MCP release on 2026-07-21: added `devhub-mcp` crate as a read-only
+  stdio MCP server (project tree, file read, content search, README, Git log)
+  plus an in-app HTTP server on `0.0.0.0` with status-strip toggle and bearer
+  token auth. Per-project todo list with add/toggle/delete/persistence. Removed
+  the OpenCode provider and credential storage — MCP clients bring their own
+  models. Replaced the chat panel with the todo side panel. 122 tests pass.
+- V2.1.1 closure on 2026-07-22: stable local/SSH project identity, bounded MCP
+  cancellation and symlink containment, Linux client-side decorations, Windows
+  SSH-host routing, localhost-only MCP HTTP with generated bearer tokens,
+  settings controls, and matching native icon metadata for the GUI and MCP
+  executable identities on Windows, Linux, and macOS.
+
 
 The plan was approved on 2026-06-30. Phase 1 created only the minimal scaffold;
 no DevHub source was copied and no Git operation or DevHub modification occurred.
@@ -293,32 +346,41 @@ real DevHub logic was introduced. Current structure after Phase 6:
 ```text
 [REDACTED]\devhub-gpui\
 ├── ADR.md
-├── Cargo.toml                 # workspace manifest
-├── Cargo.lock                 # committed application lockfile once generated
-├── README.md                  # concise build/run instructions
-├── appicon.svg               # canonical application icon source
+├── Cargo.toml                  # workspace manifest
+├── Cargo.lock                  # committed application lockfile once generated
+├── README.md                   # concise build/run instructions
+├── build\app_icon.rs           # shared Windows/macOS icon rendering
+├── packaging\                 # Linux desktop and macOS bundle metadata
 └── crates\
-    ├── devhub-core\           # UI-independent local/SSH domain and workspace logic
+    ├── devhub-core\            # UI-independent local/SSH domain and workspace logic
     │   ├── Cargo.toml
     │   └── src\
     │       ├── lib.rs
-    │       ├── config.rs      # TOML config with distinct devhub-gpui identity
-    │       ├── cache.rs       # versioned project cache
+    │       ├── config.rs       # TOML config with distinct devhub-gpui identity
+    │       ├── cache.rs        # versioned project cache
+    │       ├── cancellation.rs
     │       ├── discovery.rs
-    │       ├── remote.rs      # bounded OpenSSH transport and remote operations
-    │       └── workspace.rs   # project-aware tree, read, and search API
-    └── devhub-gpui\           # GPUI state and presentation
+    │       ├── remote.rs       # bounded OpenSSH transport and remote operations
+    │       └── workspace.rs    # project-aware tree, read, and search API
+    ├── devhub-gpui\            # GPUI state and presentation
+    │   ├── Cargo.toml
+    │   ├── build.rs            # prepares native Windows/macOS icon assets
+    │   ├── assets\appicon.svg  # canonical application icon source
+    │   └── src\
+    │       ├── app.rs          # application state and workbench rendering
+    │       ├── assets.rs       # component icons plus embedded application icon
+    │       ├── lib.rs          # scan model plus tested offline Markdown helpers
+    │       ├── platform.rs     # isolated Windows frame and drag integration
+    │       ├── scan.rs         # testable scan coordination/state machine
+    │       ├── theme.rs        # local semantic visual tokens and font roles
+    │       ├── ui.rs           # reusable presentation primitives
+    │       └── main.rs         # minimal executable bootstrap
+    └── devhub-mcp\             # read-only MCP server for project intelligence
         ├── Cargo.toml
-        ├── build.rs           # rasterizes/embeds the Windows icon resource
+        ├── build.rs            # embeds the Windows companion icon
         └── src\
-            ├── app.rs         # application state and workbench rendering
-            ├── assets.rs      # component icons plus embedded application icon
-            ├── lib.rs         # scan model plus tested offline Markdown helpers
-            ├── platform.rs    # isolated Windows frame and drag integration
-            ├── scan.rs        # testable scan coordination/state machine
-            ├── theme.rs       # local semantic visual tokens and font roles
-            ├── ui.rs          # reusable presentation primitives
-            └── main.rs        # minimal executable bootstrap
+            ├── lib.rs          # tool implementations (tree, read, search, README, Git log)
+            └── main.rs         # stdio binary entrypoint
 ```
 
 Dependency direction:
@@ -331,6 +393,8 @@ devhub-gpui  --->  devhub-core  --->  std / narrowly justified libraries
      +------------> gpui-component 0.5.1 (text views and editor only)
      |
      +------------> gpui-component-assets 0.5.1 (bundled Lucide SVGs)
+
+devhub-mcp  --->  devhub-core
 ```
 
 `devhub-core` must not import GPUI, egui, colors, widgets, window types, or UI
@@ -1389,9 +1453,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --release --workspace --locked
 ```
 
-The last completed test validation had 47 `devhub-core` tests, 13 `devhub-gpui`
-tests, 60 total passing tests, all-target checking passing, clippy passing with
-warnings denied, and a release build passing.
+The last completed test validation had 118 `devhub-core` tests, 38 `devhub-gpui`
+tests, 4 `devhub-mcp` tests, 160 total passing tests, all-target checking passing,
+clippy passing with warnings denied, and a release build passing.
 
 The native GPUI binary has `test = false` because embedding unit tests in the
 deeply composed binary previously caused rustc stack overflow. Pure testable
@@ -1792,7 +1856,8 @@ editor handoff, long content, and every loading/empty/error/cancelled state.
 - The permanent list/details layout is superseded by the transient catalog and
   contextual workspaces.
 - The earlier v1.2 working plan is consolidated into this V2 record. Future
-  work belongs in `ADR-NEXT.md` and must not silently reopen V2 scope.
+  work must satisfy the feature-admission criteria below and must not silently
+  reopen V2 scope.
 
 ## v2 Decision Log
 
@@ -1864,10 +1929,11 @@ DevHub remains:
   external links are explicit actions.
 - Project intelligence is exposed read-only through an explicit MCP server. A
   headless stdio binary serves local editors without the application running;
-  an in-app HTTP server on 127.0.0.1 starts only from the status-strip toggle
-  and serves the same read-only tools. DevHub stores no provider key, fetches
-  no model catalog, and implements no inference client. When the server is
-  off, no listener exists.
+  an in-app HTTP server on `127.0.0.1` starts only from the status-strip toggle,
+  requires a generated bearer token, and serves the same read-only tools.
+  Tailscale Serve owns tailnet HTTPS routing. DevHub stores no provider key,
+  fetches no model catalog, and implements no inference client. When the server
+  is off, no listener exists.
 - Project-centered. The selected project owns Files, Search, Git, History,
   terminal, and editor context.
 - Keyboard-first. Every frequent action is reachable through focused
@@ -2070,7 +2136,10 @@ reproducible before/after result and no stale-state regression.
 
 ### P1-008: Read-only project intelligence over MCP, and pre-handoff todos
 
-V3 replaces the V2 Ask Project panel and its OpenCode provider with a
+Status: complete in v2.1.1. Further MCP work requires a demonstrated workflow
+or security defect.
+
+V2.1 replaces the V2 Ask Project panel and its OpenCode provider with a
 read-only Model Context Protocol surface plus a lightweight per-project todo
 panel. DevHub implements no chat interface, no inference client, no provider
 key storage, and no model catalog. Clients bring their own models and agents;
@@ -2093,13 +2162,12 @@ MCP server:
 - The same read-only tools are served in two shapes. A headless `devhub-mcp`
   stdio binary links devhub-core only, loads the same configuration, cache,
   and todos, and is spawned by MCP clients such as Zed. An in-app HTTP server
-  binds 127.0.0.1 only, starts and stops from a status-strip toggle, and
-  shares the tool layer. Tailnet or internet exposure is delegated to the
-  network layer (for example `tailscale serve`); DevHub has no
-  overlay-network awareness.
-- An optional `mcp_auth_token` configuration value, when set, requires an
-  `Authorization: Bearer` header on HTTP requests. It exists solely for
-  internet exposure and is empty by default.
+  binds `127.0.0.1`, starts and stops from a status-strip toggle, accepts
+  reverse-proxy Host authorities, and shares the tool layer. Tailnet routing is
+  delegated to Tailscale Serve; DevHub has no overlay-network awareness.
+- HTTP always requires `Authorization: Bearer <token>`. DevHub generates a
+  256-bit token before the first listener starts and exposes masked copy and
+  regeneration controls in Settings. Tokens never enter activity logs.
 - All tools are read-only and bounded, and reuse the existing local and SSH
   tree, read, search, and Git paths with cancellation. Tool descriptions mark
   live SSH reads as network round-trips. `project_overview` includes one live
@@ -2124,7 +2192,7 @@ chat panel that hosted them no longer exists.
 
 ## P2: Evidence-Required Candidates
 
-These are not committed V3 features:
+These are not committed features:
 
 - Git worktree creation or management
 - Multiple simultaneous terminal sessions per project
@@ -2136,7 +2204,7 @@ These are not committed V3 features:
 A P2 item moves to P1 only after normal use demonstrates repeated friction and
 the smallest useful interaction is agreed first.
 
-## P3: Outside V3
+## P3: Out of scope
 
 - A general-purpose code editor or merge editor
 - Automatic Fetch, Pull, Push, cloning, or repository mutation
@@ -2157,7 +2225,7 @@ These items require a new product decision, not opportunistic implementation.
 
 ### Milestone 0: V2 audit
 
-- Reconcile implementation, `ADR.md`, `ADR-NEXT.md`, README, and release state.
+- Reconcile implementation, `ADR.md`, README, and release state.
 - Run the full static validation gate.
 - Record native gaps without converting them into speculative features.
 
@@ -2193,25 +2261,34 @@ an extra console, wrong folder, or silent fallback.
 
 ### Milestone 4: Todo panel and MCP intelligence
 
+Status: complete in v2.1.1.
+
 - Remove the V2 Ask Project panel, OpenCode provider, credential storage, and
   their dependencies.
 - Implement the versioned per-project todo store and the side panel.
 - Implement the read-only tool layer over existing local/SSH paths.
 - Implement the `devhub-mcp` stdio binary and the in-app HTTP server with
-  status-strip toggle, optional bearer token, and activity log.
+  status-strip toggle, required bearer token, and activity log.
 
 Gate: tools answer from cache plus live bounded reads, every call is
 read-only and logged, server-off means no listener, SSH tools behave under
 latency and cancellation, and no inference or credential code remains.
 
-### Milestone 5: Performance and v3 release
+### Milestone 5: Release closure and maintenance
 
-- Complete P1-007 and P1-008.
+- Measure P1-007 only after reproducible latency; P1-008 is complete.
 - Run static, native, clean-install, and release-artifact validation.
 - Update public documentation only after evidence exists.
 
 Gate: no open P0/P1 item, no unexplained UI stall, no unintended network or
 child process, and no release claim unsupported by validation.
+
+## Next action
+
+Close v2.1.1 with the full static gate and native checks for Tailscale Serve,
+Linux window decorations, and Linux-to-Windows SSH. After release, DevHub moves
+to defect-only maintenance. P1 and P2 items remain trigger-only; a new feature
+must satisfy Feature Admission with observed evidence before implementation.
 
 ## Validation
 
@@ -2242,9 +2319,13 @@ Native matrix:
 - `devhub-mcp` stdio session with a real client against local and SSH
   projects; tool bounding, binary refusal, cancellation, and cold-cache
   behavior
-- HTTP server toggle on/off, 127.0.0.1 binding, no listener when off,
-  bearer-token rejection and acceptance, activity-log content from both
+- HTTP server toggle on/off, `127.0.0.1` binding, tailnet Host-header routing,
+  no listener when off, bearer-token rejection and acceptance, token generation,
+  activity-log content from both
   server shapes, and tailnet exposure through `tailscale serve`
+- Release archives expose both executable identities with matching Windows PE
+  icons, Linux XDG metadata and SVGs, and validated macOS app bundles and ICNS
+  resources
 
 ## Decision Log
 
@@ -2265,9 +2346,13 @@ Native matrix:
 | 2026-07-20 | Persist bounded project context locally                  | Reopening an unchanged project should not repeat repository analysis                                            |
 | 2026-07-21 | Replace Ask Project with read-only MCP tools             | The chat harness was the unmaintainable part; retrieval already works and external agents orchestrate it better |
 | 2026-07-21 | Delete the OpenCode provider and credential storage      | With MCP, clients bring their own models; DevHub stores no keys                                                 |
-| 2026-07-21 | Serve tools as a stdio binary plus in-app localhost HTTP | stdio works with the app closed; HTTP is toggle-explicit and overlay exposure stays outside the app             |
+| 2026-07-21 | Serve tools as a stdio binary plus toggle-explicit in-app HTTP | stdio works with the app closed; the HTTP listener supports LAN and reverse-proxied tailnet access             |
 | 2026-07-21 | Repurpose the side panel as a per-project todo list      | Pre-handoff context earns the slot the chat panel vacates                                                       |
 | 2026-07-21 | Defer architecture diagrams                              | Diagram generation lost its host surface when the panel was removed                                             |
 | 2026-07-21 | Replace MCP status indicator with an SVG icon button     | Matches other status-bar buttons and adds tooltip for left/right click actions                                  |
 | 2026-07-21 | Use auto-grow multi-line input for the todo text field   | Wraps long text and grows vertically instead of overflowing horizontally                                        |
 | 2026-07-21 | Submit todo on Shift+Enter in multi-line input           | Enter inserts newline; Shift+Enter adds the todo item, consistent with textarea convention                      |
+| 2026-07-22 | Keep stdio as a small companion and HTTP inside DevHub   | Editors own stdio pipes; the explicit in-app toggle owns the tailnet HTTP lifetime                              |
+| 2026-07-22 | Bind HTTP to localhost and require generated auth        | Tailscale Serve supplies HTTPS without exposing the backend directly to LAN peers                               |
+| 2026-07-22 | Move to evidence-triggered maintenance after v2.1.1      | No remaining candidate feature earns permanent product surface without observed repeated friction               |
+| 2026-07-22 | Package both executable identities with native icons     | PE resources, XDG metadata, and app bundles provide OS integration without adding a packaging framework          |

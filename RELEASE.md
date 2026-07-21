@@ -1,12 +1,12 @@
-# DevHub 2.0
+# DevHub 2.1.1
 
-This update focuses on removal of the prior ai-harness scaffolding in favor of a focused, practical tool.
+This maintenance update hardens project identity, SSH platform behavior, process ownership, and MCP exposure without expanding DevHub's product scope.
 
 ## Highlights
 
 ### DevHub MCP Server (`devhub-mcp`)
 
-A new read-only MCP server exposing your entire DevHub catalog as AI-editor tools. Runs locally at `127.0.0.1:47821` and provides 9 tools:
+A read-only MCP server exposes your DevHub catalog as AI-editor tools. The in-app server listens on `127.0.0.1:47821`, requires bearer authentication, and provides 9 tools:
 
 | Tool               | Description                                                |
 | ------------------ | ---------------------------------------------------------- |
@@ -27,24 +27,32 @@ There are two ways to connect DevHub to your editor:
 **Option A: Standalone (stdio)**: build the binary with `cargo build --release -p devhub-mcp` and add it as a local MCP server in your editor:
 
 ```json
-"devhub-mcp": {
-      "enabled": true,
-      "remote": false,
-      "command": "/path/to/executable",
-      "args": [],
-      "timeout": 30
-    },
+{
+  "devhub-mcp": {
+    "enabled": true,
+    "remote": false,
+    "command": "/path/to/executable",
+    "args": [],
+    "timeout": 30
+  }
+}
 ```
 
 **Option B: DevHub HTTP (Streamable HTTP)**: toggle the MCP switch inside the DevHub desktop app, then point your editor to the running server:
 
 ```json
-"devhub-mcp": {
-      "type": "remote",
-      "url": "http://127.0.0.1:47821/mcp"
+{
+  "devhub-mcp": {
+    "type": "remote",
+    "url": "http://127.0.0.1:47821/mcp",
+    "headers": {
+      "Authorization": "Bearer <token-from-devhub-settings>"
     }
   }
+}
 ```
+
+DevHub generates a 256-bit HTTP token on first start. Copy or regenerate it from Settings. For tailnet access, run `tailscale serve --bg http://127.0.0.1:47821`, use the resulting HTTPS URL ending in `/mcp`, and send the same bearer header. Reverse-proxy Host headers are accepted; direct LAN binding is intentionally disabled.
 
 ### Todo List
 
@@ -56,14 +64,20 @@ Lightweight per-project todo tracking accessible via `devhub-mcp list_todos` and
 - Linux x64
 - macOS Apple Silicon
 
-Each archive contains the executable, `README.md`, `RELEASE.md`, and `LICENSE`. SHA-256 hashes are published in `checksums.txt`.
+Every archive contains both executable identities, `README.md`, `RELEASE.md`, and `LICENSE`. Platform integration is deliberately native and small:
+
+- Windows embeds the DevHub icon in both `.exe` files.
+- Linux includes XDG desktop metadata and named SVG icons for both executables. The MCP entry is `NoDisplay` because clients launch it over stdio.
+- macOS includes ad hoc signed `DevHub.app` and `DevHub-MCP.app` bundles with matching icons. Top-level command symlinks preserve direct terminal and MCP-client execution.
+
+SHA-256 hashes are published in `checksums.txt`.
 
 ## Requirements
 
 - Git for repository workflows.
 - OpenSSH configuration and key-based authentication for SSH projects.
-- A POSIX remote environment with standard command-line tools.
+- A POSIX remote environment with standard command-line tools, or a Windows SSH host with Git for Windows installed.
 - Linux requires a glibc-based system and a Vulkan-capable desktop stack.
-- The macOS build is an unsigned portable binary, not a notarized app bundle.
+- The macOS bundles are ad hoc signed for bundle integrity but are not Developer ID signed or notarized.
 
 Before running an archive, compare its SHA-256 hash with `checksums.txt`.
