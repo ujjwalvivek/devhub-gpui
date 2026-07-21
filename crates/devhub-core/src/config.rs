@@ -17,6 +17,10 @@ fn default_max_depth() -> usize {
     3
 }
 
+fn default_mcp_http_port() -> u16 {
+    47821
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeId {
@@ -97,6 +101,12 @@ pub struct Config {
 
     #[serde(default)]
     pub last_project: Option<ProjectLocator>,
+
+    #[serde(default = "default_mcp_http_port")]
+    pub mcp_http_port: u16,
+
+    #[serde(default)]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +166,8 @@ impl Default for Config {
             pinned_projects: Vec::new(),
             hidden_projects: Vec::new(),
             last_project: None,
+            mcp_http_port: default_mcp_http_port(),
+            mcp_auth_token: None,
         }
     }
 }
@@ -477,6 +489,8 @@ mod tests {
                 path: PathBuf::from("/srv/code/project"),
                 remote_host: Some("dev@example.com".into()),
             }),
+            mcp_http_port: default_mcp_http_port(),
+            mcp_auth_token: None,
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();

@@ -1,0 +1,23 @@
+[package]
+name = "devhub-mcp"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[lib]
+name = "devhub_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "devhub-mcp"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+devhub-core.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

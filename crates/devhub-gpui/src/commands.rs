@@ -30,6 +30,8 @@ pub enum CommandId {
     ShowSettings,
     ToggleTerminal,
     ToggleTodoPanel,
+    ToggleMcpServer,
+    ShowMcpActivity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +42,7 @@ pub struct CommandSpec {
     pub shortcut: Option<&'static str>,
 }
 
-pub const COMMANDS: [CommandSpec; 28] = [
+pub const COMMANDS: [CommandSpec; 30] = [
     CommandSpec {
         id: CommandId::ToggleProjectCatalog,
         title: "Toggle Project Catalog",
@@ -208,6 +210,18 @@ pub const COMMANDS: [CommandSpec; 28] = [
         title: "Toggle Project Todos",
         category: "View",
         shortcut: Some("Ctrl+Shift+T"),
+    },
+    CommandSpec {
+        id: CommandId::ToggleMcpServer,
+        title: "Toggle MCP Server",
+        category: "Application",
+        shortcut: None,
+    },
+    CommandSpec {
+        id: CommandId::ShowMcpActivity,
+        title: "Show MCP Activity",
+        category: "Application",
+        shortcut: None,
     },
 ];
 

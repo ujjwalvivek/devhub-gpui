@@ -1,18 +1,23 @@
 [workspace]
-members = ["crates/devhub-core", "crates/devhub-gpui"]
+members = ["crates/devhub-core", "crates/devhub-gpui", "crates/devhub-mcp"]
 default-members = ["crates/devhub-gpui"]
 resolver = "2"
 
 [workspace.dependencies]
 devhub-core = { path = "crates/devhub-core" }
+devhub-mcp = { path = "crates/devhub-mcp" }
+axum = "0.8"
 gpui = "0.2.2"
 gpui-component = { version = "0.5.1", features = ["tree-sitter-languages"] }
 gpui-component-assets = "0.5.1"
 ignore = "0.4"
 notify = "7.0.0"
 raw-window-handle = "0.6"
+rmcp = { version = "2.2", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 directories = "6"
 portable-pty = "0.9"

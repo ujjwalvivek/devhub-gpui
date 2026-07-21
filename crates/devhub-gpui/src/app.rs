@@ -13,13 +13,14 @@ use devhub_core::{
     git_switch_branch_cancellable, git_unstage_all_cancellable, git_unstage_cancellable,
     list_local_subdirs, list_project_tree_cancellable, list_remote_subdirs_cancellable,
     load_projects_with_diagnostics, load_todos, local_roots, open_project_in_zed,
-    read_project_file_cancellable, read_project_readme_cancellable, save_project_todos,
-    save_projects_with_diagnostics, scan_directories_cancellable, scan_remote_host_cancellable,
-    search_project_content_cancellable, sort_projects, todo_key, validate_remote_path,
-    validate_ssh_host, AppearanceMode, CancellationToken, CommitEntry, CommitFileChange, Config,
-    DirectoryEntry, FileEntry, GitBranch, GitDiffKind, GitError, GitErrorKind, GitFileChange,
-    GitOperationResult, GitStatus, PersistenceEvent, PersistenceFailure, Project, ProjectLocator,
-    RemoteHostConfig, SearchHit, ThemeId, TodoItem, TreeListing, HISTORY_PAGE_SIZE,
+    read_project_file_cancellable, read_project_readme_cancellable, read_recent_activity,
+    save_project_todos, save_projects_with_diagnostics, scan_directories_cancellable,
+    scan_remote_host_cancellable, search_project_content_cancellable, sort_projects, todo_key,
+    validate_remote_path, validate_ssh_host, ActivityEntry, AppearanceMode, CancellationToken,
+    CommitEntry, CommitFileChange, Config, DirectoryEntry, FileEntry, GitBranch, GitDiffKind,
+    GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus, PersistenceEvent,
+    PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit, ThemeId, TodoItem,
+    TreeListing, HISTORY_PAGE_SIZE,
 };
 use devhub_gpui::{
     detect_editors, filtered_commands, filtered_editors, filtered_project_indices, filtered_themes,
@@ -29,6 +30,7 @@ use devhub_gpui::{
     DiffLine, DiffLineKind, PersistenceHistory, ScanModel, ScanState, TerminalLaunch,
     TerminalPanel, Theme, MONO_FONT, TERMINAL_FONT, UI_FONT,
 };
+use devhub_mcp::http::McpHttpServer;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -160,6 +162,8 @@ struct DevHubLite {
     terminal_visible: bool,
     terminal_entity: Option<Entity<TerminalPanel>>,
     terminal_owner: Option<ProjectLocator>,
+    mcp_server: Option<McpHttpServer>,
+    mcp_activity_entries: Vec<ActivityEntry>,
     todo_panel_visible: bool,
     todo_panel_entity: Option<Entity<TodoPanel>>,
     context_pane_visible: bool,
@@ -259,6 +263,7 @@ enum LauncherMode {
     Editors,
     Projects,
     Themes,
+    Activity,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -427,6 +432,8 @@ impl DevHubLite {
             terminal_visible: false,
             terminal_entity: None,
             terminal_owner: None,
+            mcp_server: None,
+            mcp_activity_entries: Vec::new(),
             todo_panel_visible: false,
             todo_panel_entity: None,
             context_pane_visible: true,
@@ -1757,6 +1764,7 @@ impl DevHubLite {
                 .unwrap_or_default(),
             LauncherMode::Commands => 0,
             LauncherMode::Editors => 0,
+            LauncherMode::Activity => 0,
             LauncherMode::Themes => filtered_themes("")
                 .iter()
                 .position(|selection| {
@@ -1787,6 +1795,7 @@ impl DevHubLite {
             Some(LauncherMode::Editors) => self.launcher_editors().len(),
             Some(LauncherMode::Projects) => self.launcher_project_indices().len(),
             Some(LauncherMode::Themes) => filtered_themes(&self.launcher_query).len(),
+            Some(LauncherMode::Activity) => self.filtered_activity_entries().len(),
             None => 0,
         }
     }
@@ -1874,6 +1883,9 @@ impl DevHubLite {
                     }
                     Err(error) => self.record_persistence_failure(error),
                 }
+                self.close_launcher(window, cx);
+            }
+            Some(LauncherMode::Activity) => {
                 self.close_launcher(window, cx);
             }
             None => {}
@@ -1965,6 +1977,8 @@ impl DevHubLite {
             CommandId::ShowSettings => self.open_settings(window, cx),
             CommandId::ToggleTerminal => self.toggle_terminal(window, cx),
             CommandId::ToggleTodoPanel => self.toggle_todo_panel(window, cx),
+            CommandId::ToggleMcpServer => self.toggle_mcp_server(cx),
+            CommandId::ShowMcpActivity => self.open_mcp_activity(window, cx),
         }
     }
 
@@ -3594,6 +3608,47 @@ impl DevHubLite {
             Err(error) => self.record_persistence_failure(error),
         }
         cx.notify();
+    }
+
+    fn toggle_mcp_server(&mut self, cx: &mut Context<Self>) {
+        if let Some(server) = self.mcp_server.take() {
+            server.stop();
+        } else {
+            let port = if self.config.mcp_http_port == 0 {
+                47821
+            } else {
+                self.config.mcp_http_port
+            };
+            match McpHttpServer::start(port, self.config.mcp_auth_token.clone()) {
+                Ok(server) => self.mcp_server = Some(server),
+                Err(error) => {
+                    self.launch_error = Some(format!("MCP server: {error}"));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_mcp_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mcp_activity_entries = read_recent_activity(50);
+        self.open_launcher(LauncherMode::Activity, window, cx);
+    }
+
+    fn filtered_activity_entries(&self) -> Vec<&ActivityEntry> {
+        let query = self.launcher_query.trim().to_lowercase();
+        self.mcp_activity_entries
+            .iter()
+            .filter(|entry| {
+                query.is_empty()
+                    || entry.tool.to_lowercase().contains(&query)
+                    || entry
+                        .project
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .collect()
     }
 
     fn toggle_terminal_action(
@@ -6438,11 +6493,13 @@ impl DevHubLite {
             LauncherMode::Editors => "Open in",
             LauncherMode::Projects => "Projects",
             LauncherMode::Themes => "Themes",
+            LauncherMode::Activity => "MCP activity",
         };
         let panel_width = match mode {
             LauncherMode::Branches => 280.0,
             LauncherMode::Editors => 300.0,
             LauncherMode::Commands | LauncherMode::Projects | LauncherMode::Themes => 350.0,
+            LauncherMode::Activity => 420.0,
         };
         let window_width: f32 = window.bounds().size.width.into();
         let panel_left = ((window_width - panel_width) / 2.0).max(4.0);
@@ -6469,6 +6526,7 @@ impl DevHubLite {
                 };
                 (message.to_string(), theme.text_muted)
             }
+            LauncherMode::Activity => ("no MCP activity yet".to_string(), theme.text_muted),
             _ => ("no matches".to_string(), theme.text_muted),
         };
 
@@ -6739,6 +6797,85 @@ impl DevHubLite {
                                 this.launcher_selected = index;
                                 (this.pending_theme, this.pending_appearance) =
                                     selection.preferences(this.config.theme);
+                                this.accept_launcher_selection(window, cx);
+                            });
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+            LauncherMode::Activity => self
+                .filtered_activity_entries()
+                .into_iter()
+                .rev()
+                .enumerate()
+                .map(|(index, entry)| {
+                    let app = app.clone();
+                    let ok = entry.ok;
+                    let row_text = format!(
+                        "{}  {}",
+                        entry.project.as_deref().unwrap_or("-"),
+                        entry.detail.as_deref().unwrap_or("")
+                    );
+                    let tool = entry.tool.clone();
+                    let age = activity_age(entry.ts);
+                    let duration = entry.duration_ms;
+                    div()
+                        .id(("activity", index))
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .border_b_1()
+                        .border_color(theme.border.opacity(0.35))
+                        .cursor_pointer()
+                        .bg(if self.launcher_selected == index {
+                            theme.surface_selected
+                        } else {
+                            theme.surface_background
+                        })
+                        .hover(move |style| style.bg(theme.surface_hover))
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(9.0))
+                                .text_color(theme.text_disabled)
+                                .w(px(42.0))
+                                .child(format!("{age} ago")),
+                        )
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.0))
+                                .text_color(theme.text)
+                                .child(tool),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.0))
+                                .text_color(theme.text_muted)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .child(row_text),
+                        )
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(9.0))
+                                .text_color(if ok { theme.success } else { theme.error })
+                                .child(if ok {
+                                    format!("{duration}ms")
+                                } else {
+                                    "err".to_string()
+                                }),
+                        )
+                        .on_click(move |_, window, cx| {
+                            app.update(cx, |this, cx| {
+                                this.launcher_selected = index;
                                 this.accept_launcher_selection(window, cx);
                             });
                         })
@@ -7723,6 +7860,48 @@ impl Render for DevHubLite {
                                     this.toggle_todo_panel(window, cx);
                                 });
                             })
+                    })
+                    .child({
+                        let mcp_on = self.mcp_server.is_some();
+                        let label = match self.mcp_server.as_ref() {
+                            Some(server) => format!("MCP :{}", server.port()),
+                            None => "MCP off".to_string(),
+                        };
+                        div()
+                            .id("mcp-indicator")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1()
+                            .h(px(18.0))
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(theme.surface_hover))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.toggle_mcp_server(cx)),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, _, window, cx| {
+                                    this.open_mcp_activity(window, cx);
+                                }),
+                            )
+                            .child(div().size(px(5.0)).rounded_full().bg(if mcp_on {
+                                theme.success
+                            } else {
+                                theme.text_disabled
+                            }))
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(9.0))
+                                    .text_color(if mcp_on {
+                                        theme.text
+                                    } else {
+                                        theme.text_disabled
+                                    })
+                                    .child(label),
+                            )
                     }),
             )
             .when_some(launcher_panel, |app, launcher| app.child(launcher));
@@ -8032,6 +8211,23 @@ fn project_locator(project: &Project) -> ProjectLocator {
 
 fn project_locator_matches(project: &Project, locator: &ProjectLocator) -> bool {
     project.path == locator.path && project.source.host() == locator.remote_host.as_deref()
+}
+
+fn activity_age(ts: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(ts);
+    if age < 60 {
+        format!("{age}s")
+    } else if age < 3_600 {
+        format!("{}m", age / 60)
+    } else if age < 86_400 {
+        format!("{}h", age / 3_600)
+    } else {
+        format!("{}d", age / 86_400)
+    }
 }
 
 fn git_change_label(change: &GitFileChange) -> String {

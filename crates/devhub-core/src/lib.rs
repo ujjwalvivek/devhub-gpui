@@ -1,3 +1,4 @@
+mod activity;
 mod cache;
 mod cancellation;
 mod config;
@@ -7,8 +8,10 @@ mod persistence;
 mod remote;
 mod ssh;
 mod todos;
+mod tools;
 mod workspace;
 
+pub use activity::{activity_log_path, append_activity, read_recent_activity, ActivityEntry};
 pub use cache::{
     cache_path, load_projects, load_projects_with_diagnostics, save_projects,
     save_projects_with_diagnostics,
@@ -41,6 +44,13 @@ pub use remote::{
     zed_ssh_uri, DirectoryEntry,
 };
 pub use todos::{load_todos, save_project_todos, todo_key, todos_path, TodoItem, TodoMap};
+pub use tools::{
+    tool_git_diff, tool_git_log, tool_git_status, tool_list_projects, tool_list_todos,
+    tool_list_tree, tool_project_overview, tool_read_file, tool_search_content, CommitSummary,
+    FileContent, GitDiffResult, GitLogResult, GitOverview, GitStatusResult, ProjectCatalog,
+    ProjectOverview, ProjectSummary, ProjectTree, SearchMatch, SearchResults, StatusChange,
+    ToolContext, TreeEntry,
+};
 pub use workspace::{
     list_local_subdirs, list_project_tree, list_project_tree_cancellable, list_tree,
     list_tree_cancellable, local_roots, read_file, read_project_file,

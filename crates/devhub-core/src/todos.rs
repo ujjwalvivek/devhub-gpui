@@ -153,8 +153,6 @@ fn save_project_todos_to_path(
     key: &str,
     items: &[TodoItem],
 ) -> Result<PersistenceReport<()>, PersistenceFailure> {
-    // A failed load must not turn into a destructive overwrite of other
-    // projects' items, so the read-modify-write propagates load errors.
     let load = load_todos_from_path_with_diagnostics(path)?;
     let mut map = load.value;
     if items.is_empty() {
