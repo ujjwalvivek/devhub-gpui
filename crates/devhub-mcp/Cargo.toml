@@ -1,6 +1,6 @@
 [package]
 name = "devhub-mcp"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -21,6 +21,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 
 [target.'cfg(windows)'.build-dependencies]
 resvg = "0.45.1"
