@@ -1379,9 +1379,10 @@ dependencies = [
 
 [[package]]
 name = "devhub-core"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "directories",
+ "getrandom 0.3.4",
  "ignore",
  "serde",
  "serde_json",
@@ -1390,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "devhub-gpui"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "devhub-core",
  "devhub-mcp",
@@ -1410,15 +1411,17 @@ dependencies = [
 
 [[package]]
 name = "devhub-mcp"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "axum",
  "devhub-core",
+ "resvg",
  "rmcp",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+ "winresource",
 ]
 
 [[package]]

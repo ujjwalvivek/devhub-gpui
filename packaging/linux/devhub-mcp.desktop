@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DevHub MCP
+Comment=Read-only MCP companion for DevHub
+Exec=devhub-mcp
+TryExec=devhub-mcp
+Icon=devhub-mcp
+Terminal=true
+NoDisplay=true
+Categories=Development;

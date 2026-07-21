@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::config::{normalize_ssh_host, RemoteHostConfig};
@@ -89,9 +89,10 @@ pub fn check_ssh_connection_cancellable(
     host: &str,
     cancellation: &CancellationToken,
 ) -> Result<(), String> {
-    let output = run_ssh_script(
+    let output = run_ssh_command(
         host,
-        "printf devhub-ssh-ok\n",
+        &["echo", "devhub-ssh-ok"],
+        &[],
         Duration::from_secs(12),
         cancellation,
     )?;
@@ -108,18 +109,33 @@ pub fn open_project_in_zed(project: &Project) -> Result<(), String> {
         ProjectSource::Remote { .. } => zed_ssh_uri(project)?.into(),
     };
 
-    if Command::new("zed").arg(&target).spawn().is_ok() {
+    if spawn_zed("zed", &target) {
         return Ok(());
     }
 
     #[cfg(windows)]
     for candidate in zed_windows_candidates() {
-        if candidate.is_file() && Command::new(&candidate).arg(&target).spawn().is_ok() {
+        if candidate.is_file() && spawn_zed(&candidate, &target) {
             return Ok(());
         }
     }
 
     Err("Zed was not found. Install Zed or use Open in... to choose another compatible application.".into())
+}
+
+fn spawn_zed(program: impl AsRef<std::ffi::OsStr>, target: &std::ffi::OsStr) -> bool {
+    let mut command = Command::new(program);
+    command
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.spawn().is_ok()
 }
 
 pub fn zed_ssh_uri(project: &Project) -> Result<String, String> {
@@ -171,11 +187,15 @@ pub fn list_remote_subdirs_cancellable(
     cancellation: &CancellationToken,
 ) -> Result<Vec<DirectoryEntry>, String> {
     let path = validate_remote_path(path)?;
+    if path == "/" && remote_is_windows(host, cancellation) {
+        return list_windows_remote_drives(host, cancellation);
+    }
     let script = format!(
         "root={}\nfind \"$root\" -mindepth 1 -maxdepth 1 -type d -printf '%f\\t%p\\n' 2>/dev/null | head -n 500\n",
         shell_quote(&path)
     );
-    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
+    let output =
+        run_ssh_script_for_path(host, &path, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     let mut entries = output
         .lines()
         .filter_map(|line| {
@@ -188,6 +208,36 @@ pub fn list_remote_subdirs_cancellable(
         .collect::<Vec<_>>();
     entries.sort_by_cached_key(|entry| entry.name.to_lowercase());
     Ok(entries)
+}
+
+fn remote_is_windows(host: &str, cancellation: &CancellationToken) -> bool {
+    run_powershell_command(
+        host,
+        "[Console]::Out.Write('devhub-windows')",
+        Duration::from_secs(12),
+        cancellation,
+    )
+    .is_ok_and(|output| output == "devhub-windows")
+}
+
+fn list_windows_remote_drives(
+    host: &str,
+    cancellation: &CancellationToken,
+) -> Result<Vec<DirectoryEntry>, String> {
+    let script = r#"Get-PSDrive -PSProvider FileSystem | Sort-Object Name | ForEach-Object {
+    [Console]::Out.WriteLine("$($_.Name):`t$($_.Name):/")
+}"#;
+    let output = run_powershell_command(host, script, SSH_OPERATION_TIMEOUT, cancellation)?;
+    Ok(output
+        .lines()
+        .filter_map(|line| {
+            let (name, path) = line.split_once('\t')?;
+            Some(DirectoryEntry {
+                name: name.to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect())
 }
 
 pub fn scan_remote_host(config: &RemoteHostConfig) -> Result<Vec<Project>, String> {
@@ -207,6 +257,15 @@ pub fn scan_remote_host_cancellable(
     if roots.is_empty() {
         return Ok(Vec::new());
     }
+
+    let windows_remote = is_windows_remote_path(&roots[0]);
+    if roots
+        .iter()
+        .any(|root| is_windows_remote_path(root) != windows_remote)
+    {
+        return Err("SSH roots for one host cannot mix Windows and POSIX paths".into());
+    }
+    let path_hint = roots[0].clone();
 
     let roots = roots
         .iter()
@@ -258,7 +317,13 @@ done | head -n {limit}
         limit = MAX_REMOTE_PROJECTS,
     );
 
-    let output = run_ssh_script(&host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
+    let output = run_ssh_script_for_path(
+        &host,
+        &path_hint,
+        &script,
+        SSH_OPERATION_TIMEOUT,
+        cancellation,
+    )?;
     let mut projects = output
         .lines()
         .filter_map(|line| parse_remote_project(line, config, &host))
@@ -307,7 +372,8 @@ done | head -n {limit}
         depth = max_depth.clamp(1, 20),
         limit = MAX_TREE_ENTRIES + 1,
     );
-    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
+    let output =
+        run_ssh_script_for_path(host, &root, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     let entries = output
         .lines()
         .take(MAX_TREE_ENTRIES)
@@ -320,29 +386,43 @@ done | head -n {limit}
     })
 }
 
-pub fn read_remote_file(host: &str, path: &Path) -> Result<String, String> {
-    read_remote_file_cancellable(host, path, &CancellationToken::new())
+pub fn read_remote_file(host: &str, root: &Path, path: &Path) -> Result<String, String> {
+    read_remote_file_cancellable(host, root, path, &CancellationToken::new())
 }
 
 pub fn read_remote_file_cancellable(
     host: &str,
+    root: &Path,
     path: &Path,
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
+    let root = validate_remote_path(&root.to_string_lossy())?;
     let path = validate_remote_path(&path.to_string_lossy())?;
     let script = format!(
-        r#"path={path}
+        r#"root={root}
+path={path}
 [ -f "$path" ] || {{ printf 'not a file' >&2; exit 2; }}
+canonical() {{
+    if command -v realpath >/dev/null 2>&1; then realpath -- "$1"; else readlink -f -- "$1"; fi
+}}
+root_real="$(canonical "$root")" || exit 3
+path_real="$(canonical "$path")" || exit 3
+case "$path_real" in
+    "$root_real"/*) ;;
+    *) printf 'path resolves outside the project root' >&2; exit 5 ;;
+esac
 size="$(wc -c < "$path" 2>/dev/null)" || exit 3
 [ "$size" -le {limit} ] || {{ printf 'file is larger than {kib} KiB' >&2; exit 4; }}
 cat -- "$path"
 "#,
+        root = shell_quote(&root),
         path = shell_quote(&path),
         limit = MAX_FILE_BYTES,
         kib = MAX_FILE_BYTES / 1024,
     );
     decode_remote_text(
-        run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?.into_bytes(),
+        run_ssh_script_for_path(host, &path, &script, SSH_OPERATION_TIMEOUT, cancellation)?
+            .into_bytes(),
     )
 }
 
@@ -371,7 +451,8 @@ done
         root = shell_quote(&root),
         limit = MAX_FILE_BYTES,
     );
-    let bytes = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?.into_bytes();
+    let bytes = run_ssh_script_for_path(host, &root, &script, SSH_OPERATION_TIMEOUT, cancellation)?
+        .into_bytes();
     if bytes.is_empty() {
         Ok(None)
     } else {
@@ -415,23 +496,115 @@ done | head -n {limit} || true
         query = shell_quote(query),
         limit = MAX_SEARCH_HITS,
     );
-    let output = run_ssh_script(host, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
+    let output =
+        run_ssh_script_for_path(host, &root, &script, SSH_OPERATION_TIMEOUT, cancellation)?;
     Ok(output.lines().filter_map(parse_grep_hit).collect())
 }
 
-fn run_ssh_script(
+fn run_ssh_script_for_path(
     host: &str,
+    path: &str,
     script: &str,
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
-    let output = run_ssh_script_bytes(host, script, timeout, cancellation)?;
-    String::from_utf8(output).map_err(|_| "SSH output is not valid UTF-8".into())
+    let bytes = if is_windows_remote_path(path) {
+        run_windows_ssh_script_bytes(host, script, timeout, cancellation)?
+    } else {
+        run_ssh_script_bytes(host, script, timeout, cancellation)?
+    };
+    String::from_utf8(bytes).map_err(|_| "SSH output is not valid UTF-8".into())
 }
 
 pub(crate) fn run_ssh_script_bytes(
     host: &str,
     script: &str,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, String> {
+    run_ssh_command_bytes(
+        host,
+        &["sh", "-s"],
+        script.as_bytes(),
+        timeout,
+        cancellation,
+    )
+}
+
+pub(crate) fn run_windows_ssh_script_bytes(
+    host: &str,
+    script: &str,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, String> {
+    let bootstrap = r#"$candidates = @(
+    (Get-Command sh.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+    "$env:ProgramFiles\Git\bin\sh.exe",
+    "${env:ProgramFiles(x86)}\Git\bin\sh.exe"
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$sh = $candidates | Select-Object -First 1
+if (-not $sh) {
+    [Console]::Error.WriteLine('Git for Windows shell was not found on the SSH host')
+    exit 127
+}
+$process = Start-Process -FilePath $sh -ArgumentList '-s' -NoNewWindow -Wait -PassThru
+exit $process.ExitCode
+"#;
+    let encoded = encode_powershell_command(bootstrap);
+    run_ssh_command_bytes(
+        host,
+        &[
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded,
+        ],
+        script.as_bytes(),
+        timeout,
+        cancellation,
+    )
+}
+
+fn run_ssh_command(
+    host: &str,
+    remote_command: &[&str],
+    input: &[u8],
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<String, String> {
+    let bytes = run_ssh_command_bytes(host, remote_command, input, timeout, cancellation)?;
+    String::from_utf8(bytes).map_err(|_| "SSH output is not valid UTF-8".into())
+}
+
+fn run_powershell_command(
+    host: &str,
+    script: &str,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<String, String> {
+    let encoded = encode_powershell_command(script);
+    run_ssh_command(
+        host,
+        &[
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded,
+        ],
+        &[],
+        timeout,
+        cancellation,
+    )
+}
+
+fn run_ssh_command_bytes(
+    host: &str,
+    remote_command: &[&str],
+    input: &[u8],
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, String> {
@@ -446,15 +619,14 @@ pub(crate) fn run_ssh_script_bytes(
         .arg("-o")
         .arg("ConnectionAttempts=1")
         .arg(&host)
-        .arg("sh")
-        .arg("-s");
+        .args(remote_command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let output = SshRunner::new(&host, timeout, MAX_REMOTE_OUTPUT_BYTES, cancellation)
-        .run(cmd, script.as_bytes())
+        .run(cmd, input)
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -469,6 +641,43 @@ pub(crate) fn run_ssh_script_bytes(
         });
     }
     Ok(output.stdout)
+}
+
+pub fn is_windows_remote_path(path: &str) -> bool {
+    let path = path.as_bytes();
+    (path.len() >= 3 && path[0].is_ascii_alphabetic() && path[1] == b':' && path[2] == b'/')
+        || path.starts_with(b"//")
+}
+
+pub fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+pub fn encode_powershell_command(command: &str) -> String {
+    let bytes = command
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let value = u32::from(chunk[0]) << 16
+            | u32::from(*chunk.get(1).unwrap_or(&0)) << 8
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        encoded.push(ALPHABET[((value >> 18) & 0x3f) as usize] as char);
+        encoded.push(ALPHABET[((value >> 12) & 0x3f) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[((value >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(value & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 fn parse_remote_project(line: &str, config: &RemoteHostConfig, host: &str) -> Option<Project> {
@@ -564,12 +773,14 @@ fn order_tree_entries(root: &Path, entries: Vec<FileEntry>) -> Vec<FileEntry> {
 }
 
 fn parse_grep_hit(line: &str) -> Option<SearchHit> {
-    let (path, rest) = line.split_once(':')?;
-    let (line, preview) = rest.split_once(':')?;
-    Some(SearchHit {
-        path: PathBuf::from(path),
-        line: line.parse().ok()?,
-        preview: preview.trim().chars().take(MAX_PREVIEW_CHARS).collect(),
+    line.match_indices(':').find_map(|(separator, _)| {
+        let (line_number, preview) = line[separator + 1..].split_once(':')?;
+        let line_number = line_number.parse().ok()?;
+        Some(SearchHit {
+            path: PathBuf::from(&line[..separator]),
+            line: line_number,
+            preview: preview.trim().chars().take(MAX_PREVIEW_CHARS).collect(),
+        })
     })
 }
 
@@ -642,11 +853,29 @@ mod tests {
         let hit = parse_grep_hit("/srv/demo/src/main.rs:7:println!(\"hello\")").unwrap();
         assert_eq!(hit.line, 7);
         assert!(hit.path.ends_with("main.rs"));
+
+        let windows_hit =
+            parse_grep_hit("C:/dev/demo/src/main.rs:9:println!(\"windows\")").unwrap();
+        assert_eq!(windows_hit.line, 9);
+        assert_eq!(windows_hit.path, PathBuf::from("C:/dev/demo/src/main.rs"));
     }
 
     #[test]
     fn shell_quote_handles_single_quotes() {
         assert_eq!(shell_quote("/srv/user's code"), "'/srv/user'\\''s code'");
+    }
+
+    #[test]
+    fn remote_path_style_distinguishes_windows_and_posix() {
+        assert!(is_windows_remote_path("C:/Users/dev/project"));
+        assert!(is_windows_remote_path("//server/share/project"));
+        assert!(!is_windows_remote_path("/srv/project"));
+        assert!(!is_windows_remote_path("relative/project"));
+        assert_eq!(
+            powershell_quote("C:/User's/project"),
+            "'C:/User''s/project'"
+        );
+        assert_eq!(encode_powershell_command("hi"), "aABpAA==");
     }
 
     #[test]
@@ -720,7 +949,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
 
-        let error = run_ssh_script(
+        let error = run_ssh_script_bytes(
             "unreachable.invalid",
             "exit 0",
             Duration::from_secs(1),

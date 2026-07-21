@@ -6,21 +6,21 @@ use crate::ui::{
     window_control, workbench_message,
 };
 use devhub_core::{
-    cache_path, git_branches_cancellable, git_commit_cancellable, git_commit_diff_cancellable,
-    git_diff_cancellable, git_discard_cancellable, git_fetch_cancellable, git_log_cancellable,
-    git_push_cancellable, git_remote_to_github_url, git_stage_all_cancellable,
-    git_stage_cancellable, git_status_cancellable, git_status_summary_cancellable,
-    git_switch_branch_cancellable, git_unstage_all_cancellable, git_unstage_cancellable,
-    list_local_subdirs, list_project_tree_cancellable, list_remote_subdirs_cancellable,
-    load_projects_with_diagnostics, load_todos, local_roots, open_project_in_zed,
-    read_project_file_cancellable, read_project_readme_cancellable, read_recent_activity,
-    save_project_todos, save_projects_with_diagnostics, scan_directories_cancellable,
-    scan_remote_host_cancellable, search_project_content_cancellable, sort_projects, todo_key,
-    validate_remote_path, validate_ssh_host, ActivityEntry, AppearanceMode, CancellationToken,
-    CommitEntry, CommitFileChange, Config, DirectoryEntry, FileEntry, GitBranch, GitDiffKind,
-    GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus, PersistenceEvent,
-    PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit, ThemeId, TodoItem,
-    TreeListing, HISTORY_PAGE_SIZE,
+    cache_path, generate_mcp_auth_token, git_branches_cancellable, git_commit_cancellable,
+    git_commit_diff_cancellable, git_diff_cancellable, git_discard_cancellable,
+    git_fetch_cancellable, git_log_cancellable, git_push_cancellable, git_remote_to_github_url,
+    git_stage_all_cancellable, git_stage_cancellable, git_status_cancellable,
+    git_status_summary_cancellable, git_switch_branch_cancellable, git_unstage_all_cancellable,
+    git_unstage_cancellable, list_local_subdirs, list_project_tree_cancellable,
+    list_remote_subdirs_cancellable, load_projects_with_diagnostics, load_todos, local_roots,
+    open_project_in_zed, read_project_file_cancellable, read_project_readme_cancellable,
+    read_recent_activity, save_project_todos, save_projects_with_diagnostics,
+    scan_directories_cancellable, scan_remote_host_cancellable, search_project_content_cancellable,
+    sort_projects, todo_key, validate_remote_path, validate_ssh_host, ActivityEntry,
+    AppearanceMode, CancellationToken, CommitEntry, CommitFileChange, Config, DirectoryEntry,
+    FileEntry, GitBranch, GitDiffKind, GitError, GitErrorKind, GitFileChange, GitOperationResult,
+    GitStatus, PersistenceEvent, PersistenceFailure, Project, ProjectLocator, RemoteHostConfig,
+    SearchHit, ThemeId, TodoItem, TreeListing, HISTORY_PAGE_SIZE,
 };
 use devhub_gpui::{
     detect_editors, filtered_commands, filtered_editors, filtered_project_indices, filtered_themes,
@@ -166,6 +166,8 @@ struct DevHubLite {
     remote_name_input: Entity<InputState>,
     remote_host_input: Entity<InputState>,
     remote_path_input: Entity<InputState>,
+    mcp_port_input: Entity<InputState>,
+    mcp_token_input: Entity<InputState>,
     activity: Activity,
     project_catalog_open: bool,
     terminal_visible: bool,
@@ -386,6 +388,17 @@ impl DevHubLite {
                 Config::default()
             }
         };
+        let mcp_port_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Port")
+                .default_value(config.mcp_http_port.to_string())
+        });
+        let mcp_token_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Generated on first start")
+                .default_value(config.mcp_auth_token.clone().unwrap_or_default())
+                .masked(true)
+        });
 
         let scan_root = config
             .scan_dirs
@@ -436,6 +449,8 @@ impl DevHubLite {
             remote_name_input,
             remote_host_input,
             remote_path_input,
+            mcp_port_input,
+            mcp_token_input,
             activity: Activity::Overview,
             project_catalog_open: false,
             terminal_visible: false,
@@ -622,7 +637,10 @@ impl DevHubLite {
     }
 
     fn is_pinned(&self, project: &Project) -> bool {
-        self.config.pinned_projects.contains(&project.path)
+        self.config
+            .pinned_projects
+            .iter()
+            .any(|locator| locator.matches(project))
     }
 
     fn record_persistence_failure(&mut self, error: PersistenceFailure) {
@@ -714,11 +732,16 @@ impl DevHubLite {
         let Some(project) = self.scan.projects.get(project_index) else {
             return;
         };
-        let path = &project.path;
-        if let Some(pos) = self.config.pinned_projects.iter().position(|p| p == path) {
+        let locator = project_locator(project);
+        if let Some(pos) = self
+            .config
+            .pinned_projects
+            .iter()
+            .position(|item| item == &locator)
+        {
             self.config.pinned_projects.remove(pos);
         } else {
-            self.config.pinned_projects.push(path.clone());
+            self.config.pinned_projects.push(locator);
         }
         self.save_config();
         self.context_menu = None;
@@ -726,18 +749,26 @@ impl DevHubLite {
     }
 
     fn is_hidden(&self, project: &Project) -> bool {
-        self.config.hidden_projects.contains(&project.path)
+        self.config
+            .hidden_projects
+            .iter()
+            .any(|locator| locator.matches(project))
     }
 
     fn toggle_hide(&mut self, project_index: usize, cx: &mut Context<Self>) {
         let Some(project) = self.scan.projects.get(project_index) else {
             return;
         };
-        let path = &project.path;
-        if let Some(pos) = self.config.hidden_projects.iter().position(|p| p == path) {
+        let locator = project_locator(project);
+        if let Some(pos) = self
+            .config
+            .hidden_projects
+            .iter()
+            .position(|item| item == &locator)
+        {
             self.config.hidden_projects.remove(pos);
         } else {
-            self.config.hidden_projects.push(path.clone());
+            self.config.hidden_projects.push(locator);
         }
         self.save_config();
         self.context_menu = None;
@@ -753,11 +784,12 @@ impl DevHubLite {
         let Some(project) = self.scan.projects.get(project_index) else {
             return;
         };
+        let locator = project_locator(project);
         if let Some(pos) = self
             .config
             .hidden_projects
             .iter()
-            .position(|p| p == &project.path)
+            .position(|item| item == &locator)
         {
             self.config.hidden_projects.remove(pos);
         }
@@ -898,12 +930,10 @@ impl DevHubLite {
                 .get(idx)
                 .is_some_and(|p| !self.is_hidden(p))
         });
-        let pinned: std::collections::HashSet<&std::path::PathBuf> =
-            self.config.pinned_projects.iter().collect();
         indices.sort_by_key(|&idx| {
             let project = &self.scan.projects[idx];
             (
-                if pinned.contains(&project.path) { 0 } else { 1 },
+                if self.is_pinned(project) { 0 } else { 1 },
                 project.source.label().to_lowercase(),
                 project.name.to_lowercase(),
                 project.path.to_string_lossy().to_lowercase(),
@@ -2234,6 +2264,7 @@ impl DevHubLite {
             self.pending_max_depth = 3;
             self.pending_theme = self.config.theme;
             self.pending_appearance = self.config.appearance;
+            self.sync_mcp_settings_inputs(window, cx);
             self.source_picker = SourcePicker::Closed;
             if self.activity == Activity::Git {
                 self.start_git_auto_refresh(cx);
@@ -2255,6 +2286,7 @@ impl DevHubLite {
         self.pending_max_depth = self.config.max_depth;
         self.pending_theme = self.config.theme;
         self.pending_appearance = self.config.appearance;
+        self.sync_mcp_settings_inputs(window, cx);
         self.source_picker = SourcePicker::Closed;
         window.focus(&self.focus_handle);
         cx.notify();
@@ -2527,7 +2559,72 @@ impl DevHubLite {
         }
     }
 
+    fn sync_mcp_settings_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let port = self.config.mcp_http_port.to_string();
+        self.mcp_port_input.update(cx, |input, cx| {
+            input.set_value(port, window, cx);
+        });
+        let token = self.config.mcp_auth_token.clone().unwrap_or_default();
+        self.mcp_token_input.update(cx, |input, cx| {
+            input.set_value(token, window, cx);
+            input.set_masked(true, window, cx);
+        });
+    }
+
+    fn generate_pending_mcp_token(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match generate_mcp_auth_token() {
+            Ok(token) => {
+                self.mcp_token_input.update(cx, |input, cx| {
+                    input.set_value(token, window, cx);
+                    input.set_masked(true, window, cx);
+                });
+                self.launch_error = None;
+            }
+            Err(error) => self.launch_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn copy_pending_mcp_token(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let token = self.mcp_token_input.read(cx).value().trim().to_string();
+        if token.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(token));
+        self.show_copy_feedback("COPIED MCP TOKEN", cx);
+    }
+
+    fn pending_mcp_settings(&self, cx: &App) -> Result<(u16, String), String> {
+        let raw_port = self.mcp_port_input.read(cx).value();
+        let port = raw_port
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| "MCP port must be between 1 and 65535".to_string())?;
+        let entered_token = self.mcp_token_input.read(cx).value().trim().to_string();
+        let token = if entered_token.is_empty() {
+            generate_mcp_auth_token()?
+        } else {
+            entered_token
+        };
+        Ok((port, token))
+    }
+
     fn save_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (mcp_http_port, mcp_auth_token) = match self.pending_mcp_settings(cx) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.launch_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         let sources_changed = scan_sources_changed(
             &self.config,
             &self.pending_scan_dirs,
@@ -2540,12 +2637,23 @@ impl DevHubLite {
         config.max_depth = self.pending_max_depth;
         config.theme = self.pending_theme;
         config.appearance = self.pending_appearance;
+        config.mcp_http_port = mcp_http_port;
+        config.mcp_auth_token = Some(mcp_auth_token);
         config.normalize();
+        let restart_mcp = self.mcp_server.is_some()
+            && (config.mcp_http_port != self.config.mcp_http_port
+                || config.mcp_auth_token != self.config.mcp_auth_token);
         match config.save_with_diagnostics() {
             Ok(report) => {
                 self.persistence_history.record_events(report.events);
                 self.config = config;
                 self.show_settings = false;
+                if restart_mcp {
+                    if let Some(server) = self.mcp_server.take() {
+                        server.stop();
+                    }
+                    self.start_mcp_http_server();
+                }
                 if sources_changed {
                     self.begin_scan(window, cx);
                 } else if self.activity == Activity::Git {
@@ -2557,13 +2665,14 @@ impl DevHubLite {
         cx.notify();
     }
 
-    fn cancel_settings(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn cancel_settings(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.show_settings = false;
         self.pending_scan_dirs.clear();
         self.pending_remote_hosts.clear();
         self.pending_max_depth = 3;
         self.pending_theme = self.config.theme;
         self.pending_appearance = self.config.appearance;
+        self.sync_mcp_settings_inputs(window, cx);
         self.source_picker = SourcePicker::Closed;
         if self.activity == Activity::Git {
             self.start_git_auto_refresh(cx);
@@ -2587,6 +2696,7 @@ impl DevHubLite {
             .partition(|index| !self.scan.projects[*index].source.is_remote());
         let has_local_hidden = !local_hidden.is_empty();
         let has_remote_hidden = !remote_hidden.is_empty();
+        let mcp_token_empty = self.mcp_token_input.read(cx).value().trim().is_empty();
 
         let local_sources = self
             .pending_scan_dirs
@@ -2943,6 +3053,68 @@ impl DevHubLite {
                                     .child(section_label("HIDDEN PROJECTS", theme))
                                     .children(remote_hidden_rows)
                             }),
+                    ),
+            )
+            .child(
+                div()
+                    .min_h(px(54.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(div().w(px(72.0)).child(section_label("MCP HTTP", theme)))
+                    .child(
+                        div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_muted)
+                            .child("PORT"),
+                    )
+                    .child(
+                        Input::new(&self.mcp_port_input)
+                            .w(px(78.0))
+                            .h(px(24.0))
+                            .bg(theme.surface_background)
+                            .border_color(theme.border),
+                    )
+                    .child(
+                        div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(9.0))
+                            .text_color(theme.text_muted)
+                            .child("TOKEN"),
+                    )
+                    .child(
+                        div().min_w_0().flex_1().max_w(px(440.0)).child(
+                            Input::new(&self.mcp_token_input)
+                                .mask_toggle()
+                                .h(px(24.0))
+                                .bg(theme.surface_background)
+                                .border_color(theme.border),
+                        ),
+                    )
+                    .child(
+                        Button::new("generate-mcp-token")
+                            .icon(IconName::Asterisk)
+                            .tooltip("Generate a new MCP token")
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .on_click(cx.listener(Self::generate_pending_mcp_token)),
+                    )
+                    .child(
+                        Button::new("copy-mcp-token")
+                            .icon(IconName::Copy)
+                            .tooltip("Copy MCP token")
+                            .xsmall()
+                            .compact()
+                            .ghost()
+                            .disabled(mcp_token_empty)
+                            .on_click(cx.listener(Self::copy_pending_mcp_token)),
                     ),
             )
             .child(
@@ -3623,19 +3795,44 @@ impl DevHubLite {
         if let Some(server) = self.mcp_server.take() {
             server.stop();
         } else {
-            let port = if self.config.mcp_http_port == 0 {
-                47821
-            } else {
-                self.config.mcp_http_port
-            };
-            match McpHttpServer::start(port, self.config.mcp_auth_token.clone()) {
-                Ok(server) => self.mcp_server = Some(server),
-                Err(error) => {
-                    self.launch_error = Some(format!("MCP server: {error}"));
-                }
-            }
+            self.start_mcp_http_server();
         }
         cx.notify();
+    }
+
+    fn start_mcp_http_server(&mut self) {
+        let token = match self.config.mcp_auth_token.clone() {
+            Some(token) if !token.is_empty() => token,
+            _ => {
+                let token = match generate_mcp_auth_token() {
+                    Ok(token) => token,
+                    Err(error) => {
+                        self.launch_error = Some(error);
+                        return;
+                    }
+                };
+                let mut config = self.config.clone();
+                config.mcp_auth_token = Some(token.clone());
+                match config.save_with_diagnostics() {
+                    Ok(report) => {
+                        self.persistence_history.record_events(report.events);
+                        self.config = config;
+                    }
+                    Err(error) => {
+                        self.record_persistence_failure(error);
+                        return;
+                    }
+                }
+                token
+            }
+        };
+        match McpHttpServer::start(self.config.mcp_http_port, token) {
+            Ok(server) => {
+                self.mcp_server = Some(server);
+                self.launch_error = None;
+            }
+            Err(error) => self.launch_error = Some(format!("MCP server: {error}")),
+        }
     }
 
     fn open_mcp_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8200,14 +8397,11 @@ fn terminal_grid_size(window: &Window, panel_height: f32) -> (usize, usize) {
 }
 
 fn project_locator(project: &Project) -> ProjectLocator {
-    ProjectLocator {
-        path: project.path.clone(),
-        remote_host: project.source.host().map(str::to_string),
-    }
+    ProjectLocator::from_project(project)
 }
 
 fn project_locator_matches(project: &Project, locator: &ProjectLocator) -> bool {
-    project.path == locator.path && project.source.host() == locator.remote_host.as_deref()
+    locator.matches(project)
 }
 
 fn activity_age(ts: u64) -> String {
@@ -9059,6 +9253,7 @@ pub(crate) fn run() {
                     appears_transparent: true,
                     traffic_light_position: None,
                 }),
+                window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
                 app_id: Some("devhub-gpui".to_string()),
                 ..Default::default()
             },

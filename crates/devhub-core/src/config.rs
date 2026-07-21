@@ -10,7 +10,7 @@ use crate::persistence::{
 const APP_QUALIFIER: &str = "";
 const APP_ORGANIZATION: &str = "";
 const APP_IDENTITY: &str = "devhub-gpui";
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 const STATE_DIR_ENV: &str = "DEVHUB_GPUI_STATE_DIR";
 
 fn default_max_depth() -> usize {
@@ -19,6 +19,17 @@ fn default_max_depth() -> usize {
 
 fn default_mcp_http_port() -> u16 {
     47821
+}
+
+pub fn generate_mcp_auth_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| format!("generating MCP auth token: {error}"))?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(token)
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,11 +104,11 @@ pub struct Config {
     #[serde(default)]
     pub remote_hosts: Vec<RemoteHostConfig>,
 
-    #[serde(default)]
-    pub pinned_projects: Vec<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_project_locators")]
+    pub pinned_projects: Vec<ProjectLocator>,
 
-    #[serde(default)]
-    pub hidden_projects: Vec<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_project_locators")]
+    pub hidden_projects: Vec<ProjectLocator>,
 
     #[serde(default)]
     pub last_project: Option<ProjectLocator>,
@@ -109,11 +120,49 @@ pub struct Config {
     pub mcp_auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProjectLocator {
     pub path: PathBuf,
     #[serde(default)]
     pub remote_host: Option<String>,
+}
+
+impl ProjectLocator {
+    pub fn from_project(project: &crate::Project) -> Self {
+        Self {
+            path: project.path.clone(),
+            remote_host: project.source.host().map(str::to_string),
+        }
+    }
+
+    pub fn matches(&self, project: &crate::Project) -> bool {
+        self.path == project.path && self.remote_host.as_deref() == project.source.host()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredProjectLocator {
+    Locator(ProjectLocator),
+    LegacyPath(PathBuf),
+}
+
+fn deserialize_project_locators<'de, D>(deserializer: D) -> Result<Vec<ProjectLocator>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<StoredProjectLocator>::deserialize(deserializer).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| match entry {
+                StoredProjectLocator::Locator(locator) => locator,
+                StoredProjectLocator::LegacyPath(path) => ProjectLocator {
+                    path,
+                    remote_host: None,
+                },
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,7 +383,7 @@ impl Config {
                         events,
                     });
                 }
-                0 => {
+                0 | 1 => {
                     config.version = CONFIG_VERSION;
                     config.normalize();
                     let migration =
@@ -405,6 +454,14 @@ impl Config {
 
     pub fn normalize(&mut self) {
         self.max_depth = self.max_depth.clamp(1, 20);
+        if self.mcp_http_port == 0 {
+            self.mcp_http_port = default_mcp_http_port();
+        }
+        self.mcp_auth_token = self
+            .mcp_auth_token
+            .take()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
         for host in &mut self.remote_hosts {
             host.normalize();
         }
@@ -427,6 +484,16 @@ impl Config {
             }
         }
         self.remote_hosts = merged;
+        for locators in [&mut self.pinned_projects, &mut self.hidden_projects] {
+            for locator in locators.iter_mut() {
+                locator.remote_host = locator
+                    .remote_host
+                    .take()
+                    .map(|host| normalize_ssh_host(&host));
+            }
+            let mut unique = std::collections::HashSet::new();
+            locators.retain(|locator| unique.insert(locator.clone()));
+        }
     }
 
     pub fn ensure_dirs_exist() -> Result<(), String> {
@@ -467,6 +534,30 @@ mod tests {
         assert_eq!(config.version, CONFIG_VERSION);
         assert!(config.scan_dirs.is_empty());
         assert_eq!(config.max_depth, 3);
+        assert_eq!(config.mcp_http_port, 47821);
+        assert!(config.mcp_auth_token.is_none());
+    }
+
+    #[test]
+    fn generated_mcp_auth_token_is_256_bit_lowercase_hex() {
+        let token = generate_mcp_auth_token().unwrap();
+        assert_eq!(token.len(), 64);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(token, token.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn normalization_cleans_mcp_settings() {
+        let mut config = Config {
+            mcp_http_port: 0,
+            mcp_auth_token: Some("  secret  ".into()),
+            ..Config::default()
+        };
+
+        config.normalize();
+
+        assert_eq!(config.mcp_http_port, 47821);
+        assert_eq!(config.mcp_auth_token.as_deref(), Some("secret"));
     }
 
     #[test]
@@ -497,7 +588,7 @@ mod tests {
         let deserialized: Config = toml::from_str(&serialized).unwrap();
 
         assert_eq!(deserialized.version, CONFIG_VERSION);
-        assert!(serialized.contains("version = 1"));
+        assert!(serialized.contains("version = 2"));
         assert_eq!(deserialized.scan_dirs, config.scan_dirs);
         assert_eq!(deserialized.max_depth, 5);
         assert_eq!(deserialized.remote_hosts, config.remote_hosts);
@@ -548,6 +639,33 @@ mod tests {
     }
 
     #[test]
+    fn version_one_path_preferences_migrate_to_local_project_locators() {
+        let directory = test_directory("project-locator-migration");
+        let path = directory.join("config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            &path,
+            "version = 1\npinned_projects = [\"/srv/project\"]\nhidden_projects = [\"/srv/hidden\"]\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+        let migrated = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(
+            config.pinned_projects[0].path,
+            PathBuf::from("/srv/project")
+        );
+        assert!(config.pinned_projects[0].remote_host.is_none());
+        assert_eq!(config.hidden_projects[0].path, PathBuf::from("/srv/hidden"));
+        assert!(migrated.contains("version = 2"));
+        assert!(migrated.contains("[[pinned_projects]]"));
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn legacy_devhub_identity_is_distinct_from_successor_identity() {
         let reference =
             directories::ProjectDirs::from("", "", "devhub").map(|d| d.config_dir().to_path_buf());
@@ -584,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_config_is_migrated_to_version_one_atomically() {
+    fn legacy_config_is_migrated_to_current_version_atomically() {
         let directory = test_directory("legacy-migration");
         let path = directory.join("config.toml");
         std::fs::create_dir_all(&directory).unwrap();
@@ -601,7 +719,7 @@ mod tests {
         assert_eq!(config.theme, ThemeId::TokyoNightStorm);
         assert_eq!(config.appearance, AppearanceMode::System);
         assert_eq!(config.max_depth, 7);
-        assert!(migrated.contains("version = 1"));
+        assert!(migrated.contains("version = 2"));
         assert!(!path.with_extension("tmp").exists());
         assert!(path.with_extension("bak").exists());
 
@@ -619,7 +737,7 @@ mod tests {
         let error = Config::load_from_path(&path).unwrap_err();
         let save_error = Config::default().save_to_path(&path).unwrap_err();
 
-        assert!(error.contains("newer than supported version 1"));
+        assert!(error.contains("newer than supported version 2"));
         assert!(save_error.contains("refusing to overwrite config version 99"));
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(!path.with_extension("tmp").exists());
@@ -641,7 +759,7 @@ mod tests {
         assert_eq!(config.version, CONFIG_VERSION);
         assert!(config.scan_dirs.is_empty());
         assert!(config.remote_hosts.is_empty());
-        assert!(serialized.contains("version = 1"));
+        assert!(serialized.contains("version = 2"));
         assert!(!path.with_extension("tmp").exists());
         assert!(!path.with_extension("bak").exists());
 
@@ -670,7 +788,7 @@ mod tests {
         let path = directory.join("config.toml");
         std::fs::create_dir_all(&directory).unwrap();
         let backup =
-            b"version = 1\ntheme = \"tokyo-night-storm\"\nappearance = \"system\"\nmax_depth = 9\n";
+            b"version = 2\ntheme = \"tokyo-night-storm\"\nappearance = \"system\"\nmax_depth = 9\n";
         std::fs::write(path.with_extension("bak"), backup).unwrap();
         std::fs::write(path.with_extension("tmp"), b"incomplete = [").unwrap();
 
@@ -701,7 +819,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let malformed = b"version = [broken";
         let backup =
-            b"version = 1\ntheme = \"rose-pine-moon\"\nappearance = \"dark\"\nmax_depth = 6\n";
+            b"version = 2\ntheme = \"rose-pine-moon\"\nappearance = \"dark\"\nmax_depth = 6\n";
         std::fs::write(&path, malformed).unwrap();
         std::fs::write(path.with_extension("bak"), backup).unwrap();
 
@@ -727,7 +845,7 @@ mod tests {
 
         let error = Config::load_from_path(&path).unwrap_err();
 
-        assert!(error.contains("newer than supported version 1"));
+        assert!(error.contains("newer than supported version 2"));
         assert_eq!(std::fs::read(&path).unwrap(), future);
         assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), backup);
 
@@ -741,7 +859,7 @@ mod tests {
         let temporary = directory.join("config.tmp.4242.1");
         std::fs::create_dir_all(&directory).unwrap();
         let recoverable =
-            b"version = 1\ntheme = \"horizon-bold\"\nappearance = \"light\"\nmax_depth = 8\n";
+            b"version = 2\ntheme = \"horizon-bold\"\nappearance = \"light\"\nmax_depth = 8\n";
         std::fs::write(&temporary, recoverable).unwrap();
 
         let report = Config::load_or_create_at_with_diagnostics(&path).unwrap();
@@ -773,7 +891,7 @@ mod tests {
 
         let error = Config::load_or_create_at(&path).unwrap_err();
 
-        assert!(error.contains("newer than supported version 1"));
+        assert!(error.contains("newer than supported version 2"));
         assert!(!path.exists());
         assert_eq!(std::fs::read(path.with_extension("bak")).unwrap(), future);
 

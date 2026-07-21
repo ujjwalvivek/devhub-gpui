@@ -18,7 +18,8 @@ pub use cache::{
 };
 pub use cancellation::{CancellationToken, OPERATION_CANCELLED};
 pub use config::{
-    normalize_ssh_host, AppearanceMode, Config, ProjectLocator, RemoteHostConfig, ThemeId,
+    generate_mcp_auth_token, normalize_ssh_host, AppearanceMode, Config, ProjectLocator,
+    RemoteHostConfig, ThemeId,
 };
 pub use discovery::{
     scan_directories, scan_directories_cancellable, sort_projects, Project, ProjectSource,
@@ -38,18 +39,20 @@ pub use persistence::{
     PersistenceReport, PersistenceStore,
 };
 pub use remote::{
-    check_ssh_connection, check_ssh_connection_cancellable, list_remote_subdirs,
-    list_remote_subdirs_cancellable, open_project_in_zed, scan_remote_host,
-    scan_remote_host_cancellable, shell_quote, validate_remote_path, validate_ssh_host,
-    zed_ssh_uri, DirectoryEntry,
+    check_ssh_connection, check_ssh_connection_cancellable, encode_powershell_command,
+    is_windows_remote_path, list_remote_subdirs, list_remote_subdirs_cancellable,
+    open_project_in_zed, powershell_quote, scan_remote_host, scan_remote_host_cancellable,
+    shell_quote, validate_remote_path, validate_ssh_host, zed_ssh_uri, DirectoryEntry,
 };
 pub use todos::{load_todos, save_project_todos, todo_key, todos_path, TodoItem, TodoMap};
 pub use tools::{
-    tool_git_diff, tool_git_log, tool_git_status, tool_list_projects, tool_list_todos,
-    tool_list_tree, tool_project_overview, tool_read_file, tool_search_content, CommitSummary,
-    FileContent, GitDiffResult, GitLogResult, GitOverview, GitStatusResult, ProjectCatalog,
-    ProjectOverview, ProjectSummary, ProjectTree, SearchMatch, SearchResults, StatusChange,
-    ToolContext, TreeEntry,
+    tool_git_diff, tool_git_diff_cancellable, tool_git_log, tool_git_log_cancellable,
+    tool_git_status, tool_git_status_cancellable, tool_list_projects, tool_list_todos,
+    tool_list_tree, tool_list_tree_cancellable, tool_project_overview,
+    tool_project_overview_cancellable, tool_read_file, tool_read_file_cancellable,
+    tool_search_content, tool_search_content_cancellable, CommitSummary, FileContent,
+    GitDiffResult, GitLogResult, GitOverview, GitStatusResult, ProjectCatalog, ProjectOverview,
+    ProjectSummary, ProjectTree, SearchMatch, SearchResults, StatusChange, ToolContext, TreeEntry,
 };
 pub use workspace::{
     list_local_subdirs, list_project_tree, list_project_tree_cancellable, list_tree,

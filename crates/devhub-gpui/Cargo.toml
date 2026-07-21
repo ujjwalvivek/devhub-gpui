@@ -1,6 +1,6 @@
 [package]
 name = "devhub-gpui"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 publish = false
 
@@ -25,6 +25,9 @@ vte.workspace = true
 raw-window-handle.workspace = true
 windows.workspace = true
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 resvg = "0.45.1"
 winresource = "0.1"
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+resvg = "0.45.1"

@@ -465,7 +465,7 @@ mod startup_tests {
     }
 
     #[test]
-    fn path_only_preferences_collide_across_remote_hosts() {
+    fn project_locators_distinguish_remote_hosts() {
         let path = PathBuf::from("/srv/project");
         let projects = ["build-a", "build-b"].map(|host| Project {
             name: "project".into(),
@@ -481,12 +481,10 @@ mod startup_tests {
             last_modified: None,
             search_key: String::new(),
         });
-        let pinned_paths = [path];
+        let pinned = [devhub_core::ProjectLocator::from_project(&projects[0])];
 
-        assert!(projects
-            .iter()
-            .all(|project| pinned_paths.contains(&project.path)));
-        assert_ne!(projects[0].source.host(), projects[1].source.host());
+        assert!(pinned[0].matches(&projects[0]));
+        assert!(!pinned[0].matches(&projects[1]));
     }
 
     #[test]

@@ -4,13 +4,19 @@ use std::time::Duration;
 
 use devhub_mcp::http::McpHttpServer;
 
-fn post(port: u16, body: &str, session: Option<&str>, auth: Option<&str>) -> (u16, String) {
+fn post_with_host(
+    port: u16,
+    host: &str,
+    body: &str,
+    session: Option<&str>,
+    auth: Option<&str>,
+) -> (u16, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to MCP server");
     stream
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
     let mut request = format!(
-        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
     if let Some(session) = session {
@@ -34,6 +40,10 @@ fn post(port: u16, body: &str, session: Option<&str>, auth: Option<&str>) -> (u1
     (status, text)
 }
 
+fn post(port: u16, body: &str, session: Option<&str>, auth: Option<&str>) -> (u16, String) {
+    post_with_host(port, &format!("127.0.0.1:{port}"), body, session, auth)
+}
+
 fn header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("{}:", name.to_lowercase());
     response
@@ -49,9 +59,10 @@ fn initialize_body() -> &'static str {
 
 #[test]
 fn http_server_serves_tools_over_streamable_http() {
-    let server = McpHttpServer::start(0, None).expect("start server");
+    let server = McpHttpServer::start(0, "secret".to_string()).expect("start server");
+    assert!(server.address().ip().is_loopback());
 
-    let (status, response) = post(server.port(), initialize_body(), None, None);
+    let (status, response) = post(server.port(), initialize_body(), None, Some("secret"));
     assert_eq!(status, 200, "initialize response: {response}");
     assert!(response.contains("devhub-mcp"), "response: {response}");
     let session = header(&response, "mcp-session-id")
@@ -62,7 +73,7 @@ fn http_server_serves_tools_over_streamable_http() {
         server.port(),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         Some(&session),
-        None,
+        Some("secret"),
     );
     assert!(status == 200 || status == 202);
 
@@ -70,7 +81,7 @@ fn http_server_serves_tools_over_streamable_http() {
         server.port(),
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}"#,
         Some(&session),
-        None,
+        Some("secret"),
     );
     assert_eq!(status, 200, "tools/call response: {response}");
     assert!(response.contains("catalog_as_of"), "response: {response}");
@@ -79,8 +90,25 @@ fn http_server_serves_tools_over_streamable_http() {
 }
 
 #[test]
-fn http_server_enforces_bearer_token_when_configured() {
-    let server = McpHttpServer::start(0, Some("secret".to_string())).expect("start server");
+fn http_server_accepts_tailscale_serve_host_header() {
+    let server = McpHttpServer::start(0, "secret".to_string()).expect("start server");
+
+    let (status, response) = post_with_host(
+        server.port(),
+        "devhub.example-tailnet.ts.net",
+        initialize_body(),
+        None,
+        Some("secret"),
+    );
+
+    assert_eq!(status, 200, "tailnet initialize response: {response}");
+    server.stop();
+}
+
+#[test]
+fn http_server_always_enforces_bearer_token() {
+    assert!(McpHttpServer::start(0, String::new()).is_err());
+    let server = McpHttpServer::start(0, "secret".to_string()).expect("start server");
 
     let (status, _) = post(server.port(), initialize_body(), None, None);
     assert_eq!(status, 401);
@@ -96,7 +124,7 @@ fn http_server_enforces_bearer_token_when_configured() {
 
 #[test]
 fn stopping_the_server_closes_the_listener() {
-    let server = McpHttpServer::start(0, None).expect("start server");
+    let server = McpHttpServer::start(0, "secret".to_string()).expect("start server");
     let port = server.port();
     assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
 

@@ -5,7 +5,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::TERMINAL_FONT;
-use devhub_core::{shell_quote, validate_remote_path, validate_ssh_host, Project, ProjectSource};
+use devhub_core::{
+    encode_powershell_command, is_windows_remote_path, powershell_quote, shell_quote,
+    validate_remote_path, validate_ssh_host, Project, ProjectSource,
+};
 use gpui::prelude::*;
 use gpui::*;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -46,12 +49,27 @@ impl TerminalLaunch {
                 Ok((command, label))
             }
             Self::Remote { host, cwd } => {
-                let script = format!(
-                    "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
-                    shell_quote(cwd)
-                );
                 let mut command = CommandBuilder::new("ssh");
-                command.args(["-tt", host, &script]);
+                if is_windows_remote_path(cwd) {
+                    let script = format!("Set-Location -LiteralPath {}", powershell_quote(cwd));
+                    let encoded = encode_powershell_command(&script);
+                    command.args([
+                        "-tt",
+                        host,
+                        "powershell.exe",
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NoExit",
+                        "-EncodedCommand",
+                        &encoded,
+                    ]);
+                } else {
+                    let script = format!(
+                        "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+                        shell_quote(cwd)
+                    );
+                    command.args(["-tt", host, &script]);
+                }
                 Ok((command, format!("ssh {host}")))
             }
         }
@@ -412,11 +430,7 @@ impl vte::Perform for TerminalState {
                     self.put_char(' ');
                 }
             }
-            b'\x08' => {
-                if self.cursor_col > 0 {
-                    self.cursor_col -= 1;
-                }
-            }
+            b'\x08' if self.cursor_col > 0 => self.cursor_col -= 1,
             _ => {}
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "devhub-core"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -11,3 +11,4 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 directories.workspace = true
+getrandom.workspace = true

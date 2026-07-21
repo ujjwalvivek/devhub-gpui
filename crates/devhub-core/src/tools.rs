@@ -7,7 +7,7 @@ use crate::{
     list_project_tree_cancellable, load_projects, load_todos, read_project_file_cancellable,
     read_project_readme_cancellable, search_project_content_cancellable, todo_key,
     CancellationToken, CommitEntry, Config, GitDiffKind, GitFileChange, GitStatus, Project,
-    TodoItem, TodoMap,
+    ProjectLocator, TodoItem, TodoMap,
 };
 
 const MAX_TREE_ENTRIES: usize = 400;
@@ -23,7 +23,7 @@ const MAX_TOP_LEVEL_ENTRIES: usize = 60;
 #[derive(Debug, Clone)]
 pub struct ToolContext {
     pub projects: Vec<Project>,
-    pub pinned: Vec<PathBuf>,
+    pub pinned: Vec<ProjectLocator>,
     pub todos: TodoMap,
     pub catalog_as_of: Option<u64>,
 }
@@ -51,26 +51,25 @@ impl ToolContext {
         if trimmed.is_empty() {
             return None;
         }
-        if let Some(project) = self
-            .projects
-            .iter()
-            .find(|project| project.path == Path::new(trimmed))
-        {
+        if let Some(project) = unique_project(
+            self.projects
+                .iter()
+                .filter(|project| todo_key(project) == trimmed),
+        ) {
             return Some(project);
         }
         let lowered = trimmed.to_lowercase();
-        if let Some(project) = self
-            .projects
-            .iter()
-            .find(|project| project.path.to_string_lossy().to_lowercase() == lowered)
-        {
+        if let Some(project) = unique_project(self.projects.iter().filter(|project| {
+            project.path == Path::new(trimmed)
+                || project.path.to_string_lossy().to_lowercase() == lowered
+        })) {
             return Some(project);
         }
-        if let Some(project) = self
-            .projects
-            .iter()
-            .find(|project| project.name.eq_ignore_ascii_case(trimmed))
-        {
+        if let Some(project) = unique_project(
+            self.projects
+                .iter()
+                .filter(|project| project.name.eq_ignore_ascii_case(trimmed)),
+        ) {
             return Some(project);
         }
         let mut matches = self
@@ -91,6 +90,7 @@ impl ToolContext {
             .map(|items| items.iter().filter(|item| !item.done).count())
             .unwrap_or_default();
         ProjectSummary {
+            id: todo_key(project),
             name: project.name.clone(),
             path: project.path.to_string_lossy().into_owned(),
             source: project.source.label().to_string(),
@@ -100,14 +100,20 @@ impl ToolContext {
             git_remote: project.git_remote.clone(),
             markers: project.markers_found.clone(),
             last_modified: project.last_modified,
-            pinned: self.pinned.contains(&project.path),
+            pinned: self.pinned.iter().any(|locator| locator.matches(project)),
             todo_open,
         }
     }
 }
 
+fn unique_project<'a>(mut projects: impl Iterator<Item = &'a Project>) -> Option<&'a Project> {
+    let project = projects.next()?;
+    projects.next().is_none().then_some(project)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectSummary {
+    pub id: String,
     pub name: String,
     pub path: String,
     pub source: String,
@@ -251,13 +257,21 @@ pub fn tool_project_overview(
     project: &Project,
 ) -> Result<ProjectOverview, String> {
     let cancellation = CancellationToken::new();
-    let readme = read_project_readme_cancellable(project, &cancellation)?;
+    tool_project_overview_cancellable(context, project, &cancellation)
+}
+
+pub fn tool_project_overview_cancellable(
+    context: &ToolContext,
+    project: &Project,
+    cancellation: &CancellationToken,
+) -> Result<ProjectOverview, String> {
+    let readme = read_project_readme_cancellable(project, cancellation)?;
     let (readme_excerpt, readme_truncated) = readme.map_or((None, false), |readme| {
         let truncated = readme.chars().count() > MAX_README_CHARS;
         let excerpt = readme.chars().take(MAX_README_CHARS).collect::<String>();
         (Some(excerpt), truncated)
     });
-    let top_level = list_project_tree_cancellable(project, 1, false, &cancellation)
+    let top_level = list_project_tree_cancellable(project, 1, false, cancellation)
         .map(|listing| {
             listing
                 .entries
@@ -274,8 +288,8 @@ pub fn tool_project_overview(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let git = git_status_cancellable(project, &cancellation).ok();
-    let last_commit = git_log_cancellable(project, 1, 0, &cancellation)
+    let git = git_status_cancellable(project, cancellation).ok();
+    let last_commit = git_log_cancellable(project, 1, 0, cancellation)
         .ok()
         .and_then(|commits| commits.into_iter().next());
     let todos = context
@@ -300,8 +314,17 @@ pub fn tool_list_tree(
     show_hidden: bool,
 ) -> Result<ProjectTree, String> {
     let cancellation = CancellationToken::new();
+    tool_list_tree_cancellable(project, max_depth, show_hidden, &cancellation)
+}
+
+pub fn tool_list_tree_cancellable(
+    project: &Project,
+    max_depth: usize,
+    show_hidden: bool,
+    cancellation: &CancellationToken,
+) -> Result<ProjectTree, String> {
     let depth = max_depth.clamp(1, 6);
-    let listing = list_project_tree_cancellable(project, depth, show_hidden, &cancellation)?;
+    let listing = list_project_tree_cancellable(project, depth, show_hidden, cancellation)?;
     let capped = listing.entries.len() > MAX_TREE_ENTRIES;
     let entries = listing
         .entries
@@ -326,9 +349,22 @@ pub fn tool_read_file(
     start_line: usize,
     max_lines: usize,
 ) -> Result<FileContent, String> {
-    let absolute = safe_join(&project.path, relative_path)?;
     let cancellation = CancellationToken::new();
-    let content = read_project_file_cancellable(project, &absolute, &cancellation)?;
+    tool_read_file_cancellable(project, relative_path, start_line, max_lines, &cancellation)
+}
+
+pub fn tool_read_file_cancellable(
+    project: &Project,
+    relative_path: &str,
+    start_line: usize,
+    max_lines: usize,
+    cancellation: &CancellationToken,
+) -> Result<FileContent, String> {
+    let absolute = safe_join(&project.path, relative_path)?;
+    if !project.source.is_remote() {
+        ensure_canonical_containment(&project.path, &absolute)?;
+    }
+    let content = read_project_file_cancellable(project, &absolute, cancellation)?;
     let lines: Vec<&str> = content.lines().collect();
     let start = start_line.max(1);
     let limit = max_lines.clamp(1, MAX_FILE_LINES);
@@ -350,12 +386,21 @@ pub fn tool_search_content(
     query: &str,
     max_hits: usize,
 ) -> Result<SearchResults, String> {
+    let cancellation = CancellationToken::new();
+    tool_search_content_cancellable(project, query, max_hits, &cancellation)
+}
+
+pub fn tool_search_content_cancellable(
+    project: &Project,
+    query: &str,
+    max_hits: usize,
+    cancellation: &CancellationToken,
+) -> Result<SearchResults, String> {
     let query = query.trim();
     if query.is_empty() {
         return Err("search query is empty".to_string());
     }
-    let cancellation = CancellationToken::new();
-    let hits = search_project_content_cancellable(project, query, &cancellation)?;
+    let hits = search_project_content_cancellable(project, query, cancellation)?;
     let limit = max_hits.clamp(1, MAX_SEARCH_HITS);
     let capped = hits.len() > limit;
     let matches = hits
@@ -376,8 +421,15 @@ pub fn tool_search_content(
 
 pub fn tool_git_status(project: &Project) -> Result<GitStatusResult, String> {
     let cancellation = CancellationToken::new();
+    tool_git_status_cancellable(project, &cancellation)
+}
+
+pub fn tool_git_status_cancellable(
+    project: &Project,
+    cancellation: &CancellationToken,
+) -> Result<GitStatusResult, String> {
     let status =
-        git_status_cancellable(project, &cancellation).map_err(|error| error.to_string())?;
+        git_status_cancellable(project, cancellation).map_err(|error| error.to_string())?;
     let capped = status.changes.len() > MAX_STATUS_CHANGES;
     let changes = status
         .changes
@@ -401,8 +453,17 @@ pub fn tool_git_diff(
     max_chars: usize,
 ) -> Result<GitDiffResult, String> {
     let cancellation = CancellationToken::new();
+    tool_git_diff_cancellable(project, path_filter, max_chars, &cancellation)
+}
+
+pub fn tool_git_diff_cancellable(
+    project: &Project,
+    path_filter: Option<&str>,
+    max_chars: usize,
+    cancellation: &CancellationToken,
+) -> Result<GitDiffResult, String> {
     let status =
-        git_status_cancellable(project, &cancellation).map_err(|error| error.to_string())?;
+        git_status_cancellable(project, cancellation).map_err(|error| error.to_string())?;
     let filter = path_filter
         .map(str::trim)
         .filter(|filter| !filter.is_empty());
@@ -432,7 +493,7 @@ pub fn tool_git_diff(
     let mut truncated = false;
     for change in &changes {
         for kind in diff_kinds(change) {
-            let piece = git_diff_cancellable(project, change, kind, &cancellation)
+            let piece = git_diff_cancellable(project, change, kind, cancellation)
                 .map_err(|error| error.to_string())?;
             if diff.len() + piece.len() > limit {
                 truncated = true;
@@ -463,8 +524,17 @@ pub fn tool_git_diff(
 
 pub fn tool_git_log(project: &Project, skip: usize, count: usize) -> Result<GitLogResult, String> {
     let cancellation = CancellationToken::new();
+    tool_git_log_cancellable(project, skip, count, &cancellation)
+}
+
+pub fn tool_git_log_cancellable(
+    project: &Project,
+    skip: usize,
+    count: usize,
+    cancellation: &CancellationToken,
+) -> Result<GitLogResult, String> {
     let page = count.clamp(1, MAX_LOG_COMMITS);
-    let commits = git_log_cancellable(project, page, skip, &cancellation)
+    let commits = git_log_cancellable(project, page, skip, cancellation)
         .map_err(|error| error.to_string())?;
     let has_more_hint = commits.len() == page;
     Ok(GitLogResult {
@@ -557,6 +627,21 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(root.join(relative_path))
+}
+
+fn ensure_canonical_containment(root: &Path, candidate: &Path) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("resolving project root {}: {error}", root.display()))?;
+    let canonical_candidate = std::fs::canonicalize(candidate)
+        .map_err(|error| format!("resolving {}: {error}", candidate.display()))?;
+    if canonical_candidate.starts_with(&canonical_root) {
+        Ok(())
+    } else {
+        Err(format!(
+            "path '{}' resolves outside the project root",
+            candidate.display()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -693,6 +778,69 @@ mod tests {
     }
 
     #[test]
+    fn project_resolution_requires_identity_when_paths_collide() {
+        let root = test_directory("tools-identity");
+        let path = root.join("shared");
+        let mut first = fixture_project("shared", &path);
+        first.source = ProjectSource::Remote {
+            name: "one".into(),
+            host: "one.example".into(),
+        };
+        let mut second = first.clone();
+        second.source = ProjectSource::Remote {
+            name: "two".into(),
+            host: "two.example".into(),
+        };
+        let context = context_with(vec![first.clone(), second]);
+
+        assert!(context.resolve(&path.to_string_lossy()).is_none());
+        assert!(context.resolve("shared").is_none());
+        assert_eq!(
+            context.resolve(&todo_key(&first)).unwrap().source.host(),
+            Some("one.example")
+        );
+    }
+
+    #[test]
+    fn cancelled_tool_operation_stops_before_tree_work() {
+        let root = test_directory("tools-cancelled");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = fixture_project("fixture", &root);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = tool_list_tree_cancellable(&project, 2, false, &cancellation).unwrap_err();
+
+        assert_eq!(error, crate::OPERATION_CANCELLED);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_tool_rejects_symlinks_that_escape_the_project() {
+        let root = test_directory("tools-symlink-root");
+        let outside = test_directory("tools-symlink-outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside").unwrap();
+        let link = root.join("escape.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("secret.txt"), &link).unwrap();
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(outside.join("secret.txt"), &link).is_err() {
+            std::fs::remove_dir_all(root).unwrap();
+            std::fs::remove_dir_all(outside).unwrap();
+            return;
+        }
+        let project = fixture_project("fixture", &root);
+
+        let error = tool_read_file(&project, "escape.txt", 1, 10).unwrap_err();
+
+        assert!(error.contains("outside the project root"));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
     fn list_tree_respects_depth() {
         let root = test_directory("tools-tree");
         write_files(&root);
@@ -788,7 +936,7 @@ mod tests {
         let alpha = fixture_project("alpha", &root.join("alpha"));
         let beta = fixture_project("beta", &root.join("beta"));
         let mut context = context_with(vec![alpha.clone(), beta]);
-        context.pinned.push(alpha.path.clone());
+        context.pinned.push(ProjectLocator::from_project(&alpha));
         context.todos.insert(
             todo_key(&alpha),
             vec![TodoItem::new("open item"), {

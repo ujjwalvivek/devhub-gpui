@@ -46,14 +46,17 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             executable: devhub-gpui.exe
+            mcp_executable: devhub-mcp.exe
             archive: zip
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             executable: devhub-gpui
+            mcp_executable: devhub-mcp
             archive: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             executable: devhub-gpui
+            mcp_executable: devhub-mcp
             archive: tar.gz
     runs-on: ${{ matrix.os }}
 
@@ -70,9 +73,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential clang cmake libasound2-dev libfontconfig-dev \
+            build-essential clang cmake desktop-file-utils libasound2-dev libfontconfig-dev \
             libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev \
             libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libzstd-dev
+
+      - name: Validate Linux desktop metadata
+        if: runner.os == 'Linux'
+        run: |
+          desktop-file-validate packaging/linux/devhub-gpui.desktop
+          desktop-file-validate packaging/linux/devhub-mcp.desktop
+
+      - name: Validate macOS bundle metadata
+        if: runner.os == 'macOS'
+        run: |
+          plutil -lint packaging/macos/DevHub.Info.plist
+          plutil -lint packaging/macos/DevHub-MCP.Info.plist
+
+      - name: Configure macOS icon output
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "DEVHUB_MACOS_ICONSET_OUT=$RUNNER_TEMP/DevHub.iconset" >> "$GITHUB_ENV"
 
       - name: Locate the Windows shader compiler
         if: runner.os == 'Windows'
@@ -88,6 +108,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: Test workspace
         run: cargo test --workspace --locked
 
@@ -97,9 +126,51 @@ jobs:
       - name: Package release archive
         shell: bash
         run: |
-          package="devhub-gpui-${{ needs.metadata.outputs.version }}-${{ matrix.target }}"
+          version="${{ needs.metadata.outputs.version }}"
+          package="devhub-gpui-${version}-${{ matrix.target }}"
+          gui="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          mcp="target/${{ matrix.target }}/release/${{ matrix.mcp_executable }}"
           mkdir -p "$package"
-          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "$package/"
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            iconutil -c icns "$DEVHUB_MACOS_ICONSET_OUT" -o "$RUNNER_TEMP/appicon.icns"
+
+            gui_bundle="$package/DevHub.app/Contents"
+            mkdir -p "$gui_bundle/MacOS" "$gui_bundle/Resources"
+            cp "$gui" "$gui_bundle/MacOS/devhub-gpui"
+            cp packaging/macos/DevHub.Info.plist "$gui_bundle/Info.plist"
+            cp "$RUNNER_TEMP/appicon.icns" "$gui_bundle/Resources/appicon.icns"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$gui_bundle/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$gui_bundle/Info.plist"
+
+            mcp_bundle="$package/DevHub-MCP.app/Contents"
+            mkdir -p "$mcp_bundle/MacOS" "$mcp_bundle/Resources"
+            cp "$mcp" "$mcp_bundle/MacOS/devhub-mcp"
+            cp packaging/macos/DevHub-MCP.Info.plist "$mcp_bundle/Info.plist"
+            cp "$RUNNER_TEMP/appicon.icns" "$mcp_bundle/Resources/appicon.icns"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$mcp_bundle/Info.plist"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$mcp_bundle/Info.plist"
+
+            codesign --force --deep --sign - "$package/DevHub.app"
+            codesign --force --deep --sign - "$package/DevHub-MCP.app"
+            codesign --verify --deep --strict "$package/DevHub.app"
+            codesign --verify --deep --strict "$package/DevHub-MCP.app"
+            ln -s "DevHub.app/Contents/MacOS/devhub-gpui" "$package/devhub-gpui"
+            ln -s "DevHub-MCP.app/Contents/MacOS/devhub-mcp" "$package/devhub-mcp"
+          else
+            cp "$gui" "$package/"
+            cp "$mcp" "$package/"
+          fi
+
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            mkdir -p "$package/share/applications"
+            mkdir -p "$package/share/icons/hicolor/scalable/apps"
+            cp packaging/linux/devhub-gpui.desktop "$package/share/applications/"
+            cp packaging/linux/devhub-mcp.desktop "$package/share/applications/"
+            cp crates/devhub-gpui/assets/appicon.svg "$package/share/icons/hicolor/scalable/apps/devhub-gpui.svg"
+            cp crates/devhub-gpui/assets/appicon.svg "$package/share/icons/hicolor/scalable/apps/devhub-mcp.svg"
+          fi
+
           cp README.md RELEASE.md LICENSE "$package/"
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a "${package}.zip" "$package"

@@ -114,7 +114,7 @@ pub fn list_project_tree_cancellable(
 pub fn read_project_file(project: &Project, path: &Path) -> Result<String, String> {
     match &project.source {
         ProjectSource::Local => read_file(path),
-        ProjectSource::Remote { host, .. } => read_remote_file(host, path),
+        ProjectSource::Remote { host, .. } => read_remote_file(host, &project.path, path),
     }
 }
 
@@ -127,7 +127,7 @@ pub fn read_project_file_cancellable(
     let result = match &project.source {
         ProjectSource::Local => read_file(path),
         ProjectSource::Remote { host, .. } => {
-            read_remote_file_cancellable(host, path, cancellation)
+            read_remote_file_cancellable(host, &project.path, path, cancellation)
         }
     };
     cancellation.check()?;

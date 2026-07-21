@@ -3,9 +3,10 @@ pub mod http;
 use std::time::Instant;
 
 use devhub_core::{
-    append_activity, tool_git_diff, tool_git_log, tool_git_status, tool_list_projects,
-    tool_list_todos, tool_list_tree, tool_project_overview, tool_read_file, tool_search_content,
-    ActivityEntry, Project, ToolContext,
+    append_activity, todo_key, tool_git_diff_cancellable, tool_git_log_cancellable,
+    tool_git_status_cancellable, tool_list_projects, tool_list_todos, tool_list_tree_cancellable,
+    tool_project_overview_cancellable, tool_read_file_cancellable, tool_search_content_cancellable,
+    ActivityEntry, CancellationToken, Project, ToolContext,
 };
 use rmcp::{
     handler::server::wrapper::Parameters,
@@ -62,10 +63,16 @@ impl DevHubMcp {
     #[tool(
         description = "List all projects in the DevHub catalog: name, path, source (local or SSH host), type, git remote, markers, pinned state, last-modified, and open todo counts. Answered from the local catalog cache; catalog_as_of (epoch seconds) stamps its freshness."
     )]
-    async fn list_projects(&self) -> Result<CallToolResult, ErrorData> {
-        run("list_projects", None, move |context, _| {
-            Ok(tool_list_projects(context))
-        })
+    async fn list_projects(
+        &self,
+        request_cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, ErrorData> {
+        run(
+            "list_projects",
+            None,
+            request_cancellation,
+            move |context, _, _| Ok(tool_list_projects(context)),
+        )
         .await
     }
 
@@ -75,13 +82,15 @@ impl DevHubMcp {
     async fn project_overview(
         &self,
         Parameters(query): Parameters<ProjectQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         run(
             "project_overview",
             Some(query.project),
-            move |context, project| {
+            request_cancellation,
+            move |context, project, cancellation| {
                 let project = expect_project(project)?;
-                tool_project_overview(context, project)
+                tool_project_overview_cancellable(context, project, cancellation)
             },
         )
         .await
@@ -93,13 +102,19 @@ impl DevHubMcp {
     async fn list_tree(
         &self,
         Parameters(query): Parameters<TreeQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         let depth = query.max_depth.unwrap_or(2);
         let hidden = query.show_hidden.unwrap_or(false);
-        run("list_tree", Some(query.project), move |_, project| {
-            let project = expect_project(project)?;
-            tool_list_tree(project, depth, hidden)
-        })
+        run(
+            "list_tree",
+            Some(query.project),
+            request_cancellation,
+            move |_, project, cancellation| {
+                let project = expect_project(project)?;
+                tool_list_tree_cancellable(project, depth, hidden, cancellation)
+            },
+        )
         .await
     }
 
@@ -109,13 +124,19 @@ impl DevHubMcp {
     async fn read_file(
         &self,
         Parameters(query): Parameters<ReadQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         let start = query.start_line.unwrap_or(1);
         let lines = query.max_lines.unwrap_or(400);
-        run("read_file", Some(query.project), move |_, project| {
-            let project = expect_project(project)?;
-            tool_read_file(project, &query.path, start, lines)
-        })
+        run(
+            "read_file",
+            Some(query.project),
+            request_cancellation,
+            move |_, project, cancellation| {
+                let project = expect_project(project)?;
+                tool_read_file_cancellable(project, &query.path, start, lines, cancellation)
+            },
+        )
         .await
     }
 
@@ -125,12 +146,18 @@ impl DevHubMcp {
     async fn search_content(
         &self,
         Parameters(query): Parameters<SearchQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         let max_hits = query.max_hits.unwrap_or(50);
-        run("search_content", Some(query.project), move |_, project| {
-            let project = expect_project(project)?;
-            tool_search_content(project, &query.query, max_hits)
-        })
+        run(
+            "search_content",
+            Some(query.project),
+            request_cancellation,
+            move |_, project, cancellation| {
+                let project = expect_project(project)?;
+                tool_search_content_cancellable(project, &query.query, max_hits, cancellation)
+            },
+        )
         .await
     }
 
@@ -140,11 +167,17 @@ impl DevHubMcp {
     async fn git_status(
         &self,
         Parameters(query): Parameters<ProjectQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
-        run("git_status", Some(query.project), move |_, project| {
-            let project = expect_project(project)?;
-            tool_git_status(project)
-        })
+        run(
+            "git_status",
+            Some(query.project),
+            request_cancellation,
+            move |_, project, cancellation| {
+                let project = expect_project(project)?;
+                tool_git_status_cancellable(project, cancellation)
+            },
+        )
         .await
     }
 
@@ -154,12 +187,18 @@ impl DevHubMcp {
     async fn git_diff(
         &self,
         Parameters(query): Parameters<DiffQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         let max_chars = query.max_chars.unwrap_or(60_000);
-        run("git_diff", Some(query.project), move |_, project| {
-            let project = expect_project(project)?;
-            tool_git_diff(project, query.path.as_deref(), max_chars)
-        })
+        run(
+            "git_diff",
+            Some(query.project),
+            request_cancellation,
+            move |_, project, cancellation| {
+                let project = expect_project(project)?;
+                tool_git_diff_cancellable(project, query.path.as_deref(), max_chars, cancellation)
+            },
+        )
         .await
     }
 
@@ -169,13 +208,19 @@ impl DevHubMcp {
     async fn git_log(
         &self,
         Parameters(query): Parameters<LogQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         let skip = query.skip.unwrap_or(0);
         let count = query.count.unwrap_or(15);
-        run("git_log", Some(query.project), move |_, project| {
-            let project = expect_project(project)?;
-            tool_git_log(project, skip, count)
-        })
+        run(
+            "git_log",
+            Some(query.project),
+            request_cancellation,
+            move |_, project, cancellation| {
+                let project = expect_project(project)?;
+                tool_git_log_cancellable(project, skip, count, cancellation)
+            },
+        )
         .await
     }
 
@@ -185,11 +230,13 @@ impl DevHubMcp {
     async fn list_todos(
         &self,
         Parameters(query): Parameters<ProjectQuery>,
+        request_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, ErrorData> {
         run(
             "list_todos",
             Some(query.project),
-            move |context, project| {
+            request_cancellation,
+            move |context, project, _| {
                 let project = expect_project(project)?;
                 Ok(tool_list_todos(context, project))
             },
@@ -230,7 +277,7 @@ fn resolve_project<'a>(context: &'a ToolContext, query: &str) -> Result<&'a Proj
             .iter()
             .filter(|project| project.name.to_lowercase().contains(&lowered))
             .take(5)
-            .map(|project| project.name.clone())
+            .map(todo_key)
             .collect::<Vec<_>>();
         if suggestions.is_empty() {
             format!("no project matches '{query}'; call list_projects to see the catalog")
@@ -246,29 +293,45 @@ fn resolve_project<'a>(context: &'a ToolContext, query: &str) -> Result<&'a Proj
 async fn run<T, F>(
     tool: &'static str,
     project_query: Option<String>,
+    request_cancellation: tokio_util::sync::CancellationToken,
     work: F,
 ) -> Result<CallToolResult, ErrorData>
 where
     T: serde::Serialize + Send + 'static,
-    F: FnOnce(&ToolContext, Option<&Project>) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&ToolContext, Option<&Project>, &CancellationToken) -> Result<T, String>
+        + Send
+        + 'static,
 {
+    let cancellation = CancellationToken::new();
+    let cancellation_bridge = cancellation.clone();
+    let watcher = tokio::spawn(async move {
+        request_cancellation.cancelled().await;
+        cancellation_bridge.cancel();
+    });
     let outcome = tokio::task::spawn_blocking(move || {
         let started = Instant::now();
+        let mut activity_project = project_query.clone();
         let result = (|| {
+            cancellation.check()?;
             let context = ToolContext::load()?;
             let resolved = match project_query.as_deref() {
                 Some(query) => Some(resolve_project(&context, query)?),
                 None => None,
             };
-            work(&context, resolved)
+            if let Some(project) = resolved {
+                activity_project = Some(todo_key(project));
+            }
+            work(&context, resolved, &cancellation)
         })();
-        (started.elapsed(), result)
+        (started.elapsed(), activity_project, result)
     })
-    .await
-    .map_err(|error| ErrorData::internal_error(format!("tool task failed: {error}"), None))?;
+    .await;
+    watcher.abort();
+    let outcome = outcome
+        .map_err(|error| ErrorData::internal_error(format!("tool task failed: {error}"), None))?;
 
-    let (duration, result) = outcome;
-    let entry = ActivityEntry::new(tool, None, result.is_ok(), duration.as_millis() as u64);
+    let (duration, project, result) = outcome;
+    let entry = ActivityEntry::new(tool, project, result.is_ok(), duration.as_millis() as u64);
     let _ = append_activity(&match &result {
         Ok(_) => entry,
         Err(error) => entry.with_detail(error.clone()),

@@ -9,24 +9,29 @@ use tokio_util::sync::CancellationToken;
 use crate::DevHubMcp;
 
 pub struct McpHttpServer {
-    port: u16,
+    address: SocketAddr,
     shutdown: CancellationToken,
-    _thread: JoinHandle<()>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl McpHttpServer {
     pub fn port(&self) -> u16 {
-        self.port
+        self.address.port()
     }
 
-    pub fn start(port: u16, auth_token: Option<String>) -> Result<Self, String> {
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    pub fn start(port: u16, auth_token: String) -> Result<Self, String> {
+        let auth_token = auth_token.trim().to_string();
+        if auth_token.is_empty() {
+            return Err("MCP auth token cannot be empty".into());
+        }
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = std::net::TcpListener::bind(address)
             .map_err(|error| format!("binding 127.0.0.1:{port}: {error}"))?;
-        let port = listener
-            .local_addr()
-            .map(|address| address.port())
-            .unwrap_or(port);
+        let address = listener.local_addr().unwrap_or(address);
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("configuring MCP listener: {error}"))?;
@@ -51,57 +56,65 @@ impl McpHttpServer {
             })
             .map_err(|error| format!("spawning MCP server thread: {error}"))?;
         Ok(Self {
-            port,
+            address,
             shutdown,
-            _thread: thread,
+            thread: Some(thread),
         })
     }
 
-    pub fn stop(self) {
+    pub fn stop(mut self) {
         self.shutdown.cancel();
-        // The thread is deliberately detached.
+        self.join_thread();
+    }
+
+    fn join_thread(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 impl Drop for McpHttpServer {
     fn drop(&mut self) {
         self.shutdown.cancel();
+        self.join_thread();
     }
 }
 
-async fn serve(
-    listener: std::net::TcpListener,
-    shutdown: CancellationToken,
-    auth_token: Option<String>,
-) {
+async fn serve(listener: std::net::TcpListener, shutdown: CancellationToken, auth_token: String) {
     let service = StreamableHttpService::new(
         || Ok(DevHubMcp),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),
+        StreamableHttpServerConfig::default()
+            .with_cancellation_token(shutdown.child_token())
+            // Reverse proxies such as Tailscale Serve preserve their public Host header.
+            // Loopback exposure and mandatory bearer authentication remain DevHub's boundary.
+            .disable_allowed_hosts(),
     );
-    let mut router = axum::Router::new().nest_service("/mcp", service);
-    if let Some(expected) = auth_token.filter(|token| !token.is_empty()) {
-        router = router.layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let expected = expected.clone();
-                async move {
-                    let authorized = request
-                        .headers()
-                        .get(axum::http::header::AUTHORIZATION)
-                        .and_then(|value| value.to_str().ok())
-                        .is_some_and(|value| value == format!("Bearer {expected}"));
-                    if authorized {
-                        next.run(request).await
-                    } else {
-                        axum::http::Response::builder()
-                            .status(axum::http::StatusCode::UNAUTHORIZED)
-                            .body(axum::body::Body::empty())
-                            .expect("static 401 response")
+    let expected = format!("Bearer {auth_token}");
+    let router =
+        axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let expected = expected.clone();
+                    async move {
+                        let authorized = request
+                            .headers()
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|value| value == expected);
+                        if authorized {
+                            next.run(request).await
+                        } else {
+                            axum::http::Response::builder()
+                                .status(axum::http::StatusCode::UNAUTHORIZED)
+                                .body(axum::body::Body::empty())
+                                .expect("static 401 response")
+                        }
                     }
-                }
-            },
-        ));
-    }
+                },
+            ));
     let listener = match tokio::net::TcpListener::from_std(listener) {
         Ok(listener) => listener,
         Err(error) => {

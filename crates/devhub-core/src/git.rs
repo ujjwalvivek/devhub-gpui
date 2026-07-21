@@ -3,7 +3,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::discovery::{Project, ProjectSource};
-use crate::remote::{run_ssh_script_bytes, shell_quote};
+use crate::remote::{
+    is_windows_remote_path, run_ssh_script_bytes, run_windows_ssh_script_bytes, shell_quote,
+};
 use crate::ssh::SshRunner;
 use crate::workspace::read_project_file_cancellable;
 use crate::{CancellationToken, OPERATION_CANCELLED};
@@ -831,8 +833,12 @@ fn run_remote_git(
     cancellation: &CancellationToken,
 ) -> Result<GitCommandOutput, GitError> {
     let script = remote_git_script(project, args);
-    let stdout = run_ssh_script_bytes(host, &script, GIT_OPERATION_TIMEOUT, cancellation)
-        .map_err(|error| classify_error(error, project, class))?;
+    let stdout = if is_windows_remote_path(&project.path.to_string_lossy()) {
+        run_windows_ssh_script_bytes(host, &script, GIT_OPERATION_TIMEOUT, cancellation)
+    } else {
+        run_ssh_script_bytes(host, &script, GIT_OPERATION_TIMEOUT, cancellation)
+    }
+    .map_err(|error| classify_error(error, project, class))?;
     Ok(GitCommandOutput {
         stdout,
         stderr: Vec::new(),

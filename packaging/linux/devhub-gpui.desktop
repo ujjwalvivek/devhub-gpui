@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DevHub
+Comment=Local-first project hub for local and SSH repositories
+Exec=devhub-gpui
+TryExec=devhub-gpui
+Icon=devhub-gpui
+Terminal=false
+Categories=Development;Utility;
+Keywords=Git;SSH;Projects;
+StartupWMClass=devhub-gpui
