@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+appdir=${APPDIR:-"$(dirname "$(readlink -f "$0")")"}
+
+if [ "${1:-}" = "--mcp-stdio" ]; then
+    shift
+    exec "$appdir/usr/bin/devhub-mcp" "$@"
+fi
+
+exec "$appdir/usr/bin/devhub-gpui" "$@"

@@ -43,21 +43,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             executable: devhub-gpui.exe
             mcp_executable: devhub-mcp.exe
-            archive: zip
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             executable: devhub-gpui
             mcp_executable: devhub-mcp
-            archive: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
             executable: devhub-gpui
             mcp_executable: devhub-mcp
-            archive: tar.gz
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -74,7 +71,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential clang cmake desktop-file-utils libasound2-dev libfontconfig-dev \
-            libglib2.0-dev libssl-dev libva-dev libvulkan1 libwayland-dev \
+            libglib2.0-dev librsvg2-bin libssl-dev libva-dev libvulkan1 libwayland-dev \
             libx11-xcb-dev libxcb1-dev libxkbcommon-x11-dev libzstd-dev
 
       - name: Validate Linux desktop metadata
@@ -123,65 +120,267 @@ jobs:
       - name: Build release binary
         run: cargo build --release --workspace --locked --target ${{ matrix.target }}
 
-      - name: Package release archive
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            Write-Warning 'Windows signing certificate is not configured; artifacts will be unsigned.'
+            exit 0
+          fi
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'devhub-signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64)
+          )
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate `
+            -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password | Where-Object HasPrivateKey | Select-Object -First 1
+          Remove-Item -LiteralPath $certificatePath -Force
+          if (-not $certificate) { throw 'No code-signing certificate with a private key was imported.' }
+          "WINDOWS_CERT_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+
+      - name: Sign Windows executables
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_THUMBPRINT)) { exit 0 }
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signTool) { throw 'signtool.exe was not found.' }
+          @(
+            'target\${{ matrix.target }}\release\${{ matrix.executable }}',
+            'target\${{ matrix.target }}\release\${{ matrix.mcp_executable }}'
+          ) | ForEach-Object {
+            & $signTool.FullName sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 $_
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed for $_" }
+          }
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = '${{ needs.metadata.outputs.version }}'
+          $source = Join-Path $env:RUNNER_TEMP 'devhub-installer-source'
+          $output = Join-Path $PWD 'dist'
+          New-Item -ItemType Directory -Force -Path $source, $output | Out-Null
+          Copy-Item 'target\${{ matrix.target }}\release\${{ matrix.executable }}' "$source\devhub-gpui.exe"
+          Copy-Item 'target\${{ matrix.target }}\release\${{ matrix.mcp_executable }}' "$source\devhub-mcp.exe"
+          Copy-Item README.md, RELEASE.md, LICENSE $source
+
+          $icon = Get-ChildItem 'target\${{ matrix.target }}\release\build\devhub-gpui-*\out\appicon.ico' |
+            Select-Object -First 1
+          if (-not $icon) { throw 'The generated Windows application icon was not found.' }
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+            if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 was not found.' }
+          fi
+
+          & $iscc "/DAppVersion=$version" "/DSourceDir=$source" "/DOutputDir=$output" `
+            "/DSetupIcon=$($icon.FullName)" 'packaging\windows\DevHub.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed.' }
+
+      - name: Sign Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_THUMBPRINT)) { exit 0 }
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          $installer = Get-ChildItem 'dist\DevHub-Setup-*.exe' | Select-Object -First 1
+          & $signTool.FullName sign /sha1 $env:WINDOWS_CERT_THUMBPRINT /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Signing the installer failed.' }
+
+      - name: Smoke test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'dist\DevHub-Setup-*.exe' | Select-Object -First 1
+          $installDir = Join-Path $env:RUNNER_TEMP 'DevHubInstall'
+          $process = Start-Process -FilePath $installer.FullName -Wait -PassThru `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installDir"
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)." }
+          @('devhub-gpui.exe', 'devhub-mcp.exe') | ForEach-Object {
+            if (-not (Test-Path (Join-Path $installDir $_))) { throw "Installed file is missing: $_" }
+          }
+
+      - name: Build Linux AppImage
+        if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euo pipefail
           version="${{ needs.metadata.outputs.version }}"
-          package="devhub-gpui-${version}-${{ matrix.target }}"
+          appdir="$RUNNER_TEMP/DevHub.AppDir"
+          tools="$RUNNER_TEMP/appimage-tools"
+          output="$PWD/dist/DevHub-${version}-x86_64.AppImage"
+          mkdir -p "$appdir" "$tools" "$PWD/dist"
+
+          curl --fail --location --retry 3 \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+            --output "$tools/linuxdeploy.AppImage"
+          curl --fail --location --retry 3 \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+            --output "$tools/appimagetool.AppImage"
+          chmod +x "$tools"/*.AppImage
+
+          "$tools/linuxdeploy.AppImage" --appimage-extract-and-run \
+            --appdir "$appdir" \
+            --executable "target/${{ matrix.target }}/release/${{ matrix.executable }}" \
+            --executable "target/${{ matrix.target }}/release/${{ matrix.mcp_executable }}" \
+            --desktop-file packaging/linux/devhub-gpui.desktop \
+            --icon-file crates/devhub-gpui/assets/appicon.svg
+
+          rm -f "$appdir/AppRun" "$appdir/.DirIcon"
+          install -Dm755 packaging/linux/AppRun "$appdir/AppRun"
+          rsvg-convert --width 256 --height 256 crates/devhub-gpui/assets/appicon.svg \
+            --output "$appdir/devhub-gpui.png"
+          ln -s devhub-gpui.png "$appdir/.DirIcon"
+          install -Dm644 "$appdir/devhub-gpui.png" \
+            "$appdir/usr/share/icons/hicolor/256x256/apps/devhub-gpui.png"
+          install -Dm644 packaging/linux/devhub-mcp.desktop \
+            "$appdir/usr/share/applications/devhub-mcp.desktop"
+          install -Dm644 "$appdir/devhub-gpui.png" \
+            "$appdir/usr/share/icons/hicolor/256x256/apps/devhub-mcp.png"
+          install -Dm644 README.md "$appdir/usr/share/doc/devhub/README.md"
+          install -Dm644 RELEASE.md "$appdir/usr/share/doc/devhub/RELEASE.md"
+          install -Dm644 LICENSE "$appdir/usr/share/doc/devhub/LICENSE"
+
+          ARCH=x86_64 "$tools/appimagetool.AppImage" --appimage-extract-and-run "$appdir" "$output"
+          chmod +x "$output"
+
+          desktop-file-validate "$appdir/devhub-gpui.desktop"
+          desktop-file-validate "$appdir/usr/share/applications/devhub-mcp.desktop"
+          test "$(find "$appdir" -maxdepth 1 -name '*.desktop' | wc -l)" -eq 1
+          test -L "$appdir/.DirIcon"
+          test -x "$appdir/usr/bin/devhub-gpui"
+          test -x "$appdir/usr/bin/devhub-mcp"
+          "$output" --appimage-extract-and-run --mcp-stdio </dev/null
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MACOS_CERTIFICATE_BASE64" ]; then
+            echo "::warning::macOS signing certificate is not configured; bundles will be ad hoc signed."
+            echo 'MACOS_CODESIGN_IDENTITY=-' >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          certificate="$RUNNER_TEMP/devhub-signing.p12"
+          keychain="$RUNNER_TEMP/devhub-build.keychain-db"
+          keychain_password="devhub-ci-keychain"
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | openssl base64 -d -A -out "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk 'NR == 1 { print $2 }')
+          test -n "$identity"
+          echo "MACOS_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          rm -f "$certificate"
+
+      - name: Build macOS disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.metadata.outputs.version }}"
           gui="target/${{ matrix.target }}/release/${{ matrix.executable }}"
           mcp="target/${{ matrix.target }}/release/${{ matrix.mcp_executable }}"
-          mkdir -p "$package"
+          package="$RUNNER_TEMP/devhub-macos"
+          dmg_root="$RUNNER_TEMP/devhub-dmg"
+          output="$PWD/dist/DevHub-${version}-arm64.dmg"
+          icon="$RUNNER_TEMP/appicon.icns"
+          mkdir -p "$package" "$dmg_root" "$PWD/dist"
+          iconutil -c icns "$DEVHUB_MACOS_ICONSET_OUT" -o "$icon"
 
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            iconutil -c icns "$DEVHUB_MACOS_ICONSET_OUT" -o "$RUNNER_TEMP/appicon.icns"
+          gui_bundle="$package/DevHub.app/Contents"
+          mkdir -p "$gui_bundle/MacOS" "$gui_bundle/Resources"
+          install -m755 "$gui" "$gui_bundle/MacOS/devhub-gpui"
+          cp packaging/macos/DevHub.Info.plist "$gui_bundle/Info.plist"
+          cp "$icon" "$gui_bundle/Resources/appicon.icns"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$gui_bundle/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$gui_bundle/Info.plist"
 
-            gui_bundle="$package/DevHub.app/Contents"
-            mkdir -p "$gui_bundle/MacOS" "$gui_bundle/Resources"
-            cp "$gui" "$gui_bundle/MacOS/devhub-gpui"
-            cp packaging/macos/DevHub.Info.plist "$gui_bundle/Info.plist"
-            cp "$RUNNER_TEMP/appicon.icns" "$gui_bundle/Resources/appicon.icns"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$gui_bundle/Info.plist"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$gui_bundle/Info.plist"
+          mcp_bundle="$package/DevHub MCP.app/Contents"
+          mkdir -p "$mcp_bundle/MacOS" "$mcp_bundle/Resources"
+          install -m755 "$mcp" "$mcp_bundle/MacOS/devhub-mcp"
+          cp packaging/macos/DevHub-MCP.Info.plist "$mcp_bundle/Info.plist"
+          cp "$icon" "$mcp_bundle/Resources/appicon.icns"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$mcp_bundle/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$mcp_bundle/Info.plist"
 
-            mcp_bundle="$package/DevHub-MCP.app/Contents"
-            mkdir -p "$mcp_bundle/MacOS" "$mcp_bundle/Resources"
-            cp "$mcp" "$mcp_bundle/MacOS/devhub-mcp"
-            cp packaging/macos/DevHub-MCP.Info.plist "$mcp_bundle/Info.plist"
-            cp "$RUNNER_TEMP/appicon.icns" "$mcp_bundle/Resources/appicon.icns"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$mcp_bundle/Info.plist"
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$mcp_bundle/Info.plist"
-
+          if [ "$MACOS_CODESIGN_IDENTITY" = '-' ]; then
             codesign --force --deep --sign - "$package/DevHub.app"
-            codesign --force --deep --sign - "$package/DevHub-MCP.app"
-            codesign --verify --deep --strict "$package/DevHub.app"
-            codesign --verify --deep --strict "$package/DevHub-MCP.app"
-            ln -s "DevHub.app/Contents/MacOS/devhub-gpui" "$package/devhub-gpui"
-            ln -s "DevHub-MCP.app/Contents/MacOS/devhub-mcp" "$package/devhub-mcp"
+            codesign --force --deep --sign - "$package/DevHub MCP.app"
           else
-            cp "$gui" "$package/"
-            cp "$mcp" "$package/"
+            codesign --force --deep --options runtime --timestamp \
+              --sign "$MACOS_CODESIGN_IDENTITY" "$package/DevHub.app"
+            codesign --force --deep --options runtime --timestamp \
+              --sign "$MACOS_CODESIGN_IDENTITY" "$package/DevHub MCP.app"
+          fi
+          codesign --verify --deep --strict "$package/DevHub.app"
+          codesign --verify --deep --strict "$package/DevHub MCP.app"
+
+          ditto "$package/DevHub.app" "$dmg_root/DevHub.app"
+          ditto "$package/DevHub MCP.app" "$dmg_root/DevHub MCP.app"
+          ln -s /Applications "$dmg_root/Applications"
+          cp "$icon" "$dmg_root/.VolumeIcon.icns"
+          cp README.md RELEASE.md LICENSE "$dmg_root/"
+          SetFile -a C "$dmg_root" || true
+          hdiutil create -volname DevHub -srcfolder "$dmg_root" -ov -format UDZO "$output"
+
+          if [ "$MACOS_CODESIGN_IDENTITY" != '-' ]; then
+            codesign --force --timestamp --sign "$MACOS_CODESIGN_IDENTITY" "$output"
+          fi
+          if [ "$MACOS_CODESIGN_IDENTITY" != '-' ] && [ -n "$APPLE_ID" ] \
+            && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+            xcrun notarytool submit "$output" --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+            xcrun stapler staple "$output"
+          else
+            echo "::warning::macOS notarization credentials are not configured; DMG was not notarized."
           fi
 
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            mkdir -p "$package/share/applications"
-            mkdir -p "$package/share/icons/hicolor/scalable/apps"
-            cp packaging/linux/devhub-gpui.desktop "$package/share/applications/"
-            cp packaging/linux/devhub-mcp.desktop "$package/share/applications/"
-            cp crates/devhub-gpui/assets/appicon.svg "$package/share/icons/hicolor/scalable/apps/devhub-gpui.svg"
-            cp crates/devhub-gpui/assets/appicon.svg "$package/share/icons/hicolor/scalable/apps/devhub-mcp.svg"
-          fi
-
-          cp README.md RELEASE.md LICENSE "$package/"
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "${package}.zip" "$package"
-          else
-            tar czf "${package}.tar.gz" "$package"
-          fi
+          hdiutil verify "$output"
+          mountpoint="$RUNNER_TEMP/devhub-mounted"
+          mkdir -p "$mountpoint"
+          hdiutil attach "$output" -nobrowse -readonly -mountpoint "$mountpoint"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          test -x "$mountpoint/DevHub.app/Contents/MacOS/devhub-gpui"
+          test -f "$mountpoint/DevHub.app/Contents/Resources/appicon.icns"
+          test -x "$mountpoint/DevHub MCP.app/Contents/MacOS/devhub-mcp"
+          test -f "$mountpoint/DevHub MCP.app/Contents/Resources/appicon.icns"
+          codesign --verify --deep --strict "$mountpoint/DevHub.app"
+          codesign --verify --deep --strict "$mountpoint/DevHub MCP.app"
 
       - uses: actions/upload-artifact@v4
         with:
           name: devhub-gpui-${{ matrix.target }}
-          path: devhub-gpui-${{ needs.metadata.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+          path: dist/*
           if-no-files-found: error
 
   release:
