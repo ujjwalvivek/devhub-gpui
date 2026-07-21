@@ -22,6 +22,7 @@ Local files, cached projects, and repository-local Git work stay offline. SSH, F
 - A POSIX remote environment with standard command-line tools, or a Windows SSH host with Git for Windows installed.
 
 The in-app MCP server listens only on `127.0.0.1:47821` when enabled and always requires a bearer token. DevHub generates and saves a 256-bit token on first start; it can be copied or regenerated from Settings. Clients send it as `Authorization: Bearer <token>`. For tailnet access, run `tailscale serve --bg http://127.0.0.1:47821` and use the resulting HTTPS URL ending in `/mcp`.
+HTTP tool calls use stateless Streamable HTTP JSON responses, so reverse proxies do not need to preserve a long-lived MCP session.
 
 Windows builds of GPUI 0.2.2 require `fxc.exe`. Set `GPUI_FXC_PATH` when the Windows SDK compiler is not discovered automatically.
 
@@ -34,13 +35,22 @@ cargo run --release -p devhub-gpui
 Packaged builds are available from
 [GitHub Releases](https://github.com/ujjwalvivek/devhub-gpui/releases).
 
-Windows embeds the DevHub icon in both executables. Linux archives include XDG
-desktop metadata and icon assets for both executable identities; the MCP entry
-is hidden because it is launched by MCP clients, not from the application menu.
-Linux associates those icons after the archive's `share` tree is installed into
-an XDG data prefix; ELF files do not contain a desktop-icon resource.
-macOS archives contain ad hoc signed `DevHub.app` and `DevHub-MCP.app` bundles,
-plus top-level command symlinks for terminal and client configuration.
+Releases use one native package per platform:
+
+- Windows: `DevHub-Setup-<version>-x64.exe` installs both icon-bearing
+  executables for the current user.
+- Linux: `DevHub-<version>-x86_64.AppImage` is the branded desktop artifact and
+  contains both executables. Run it normally for DevHub or pass `--mcp-stdio`
+  when configuring a local MCP client. Its desktop metadata and `.DirIcon`
+  provide the DevHub icon to supporting launchers and file managers.
+- macOS: `DevHub-<version>-arm64.dmg` contains branded `DevHub.app` and
+  `DevHub MCP.app` bundles. Configure stdio clients with
+  `/Applications/DevHub MCP.app/Contents/MacOS/devhub-mcp`.
+
+Linux ELF and macOS Mach-O command files do not carry a Finder-style icon
+resource themselves. The AppImage and `.app` bundles are therefore the branded
+files users see; extracting and browsing their internal command binaries can
+still show a generic executable icon.
 
 ## Validate
 

@@ -34,7 +34,7 @@ investments or explicit platform boundaries.
 
 ## Status
 
-- Current stage: DevHub-GPUI v2.1.1 — project hub with Git, terminal, command
+- Current stage: DevHub-GPUI v2.1.2 — project hub with Git, terminal, command
   palette, IDE detection, MCP project intelligence, and todo list
   - Git integration: branch picker, unified diffs, commit history, commit box,
   commit graph, staged/unstaged file actions, Fetch, Push
@@ -218,6 +218,11 @@ investments or explicit platform boundaries.
   SSH-host routing, localhost-only MCP HTTP with generated bearer tokens,
   settings controls, and matching native icon metadata for the GUI and MCP
   executable identities on Windows, Linux, and macOS.
+- V2.1.2 packaging closure on 2026-07-22: replaced raw release archives with a
+  per-user Windows installer, one branded Linux AppImage containing both
+  executable identities, and a macOS disk image containing separate branded GUI
+  and MCP app bundles. Optional Windows signing and macOS signing/notarization
+  use release secrets without changing local builds.
 
 
 The plan was approved on 2026-06-30. Phase 1 created only the minimal scaffold;
@@ -2164,7 +2169,10 @@ MCP server:
   and todos, and is spawned by MCP clients such as Zed. An in-app HTTP server
   binds `127.0.0.1`, starts and stops from a status-strip toggle, accepts
   reverse-proxy Host authorities, and shares the tool layer. Tailnet routing is
-  delegated to Tailscale Serve; DevHub has no overlay-network awareness.
+  delegated to Tailscale Serve; DevHub has no overlay-network awareness. HTTP
+  uses stateless Streamable HTTP with JSON responses because these tools retain
+  no client state and send no server-initiated messages; no long-lived SSE
+  session is held through the reverse proxy.
 - HTTP always requires `Authorization: Bearer <token>`. DevHub generates a
   256-bit token before the first listener starts and exposes masked copy and
   regeneration controls in Settings. Tokens never enter activity logs.
@@ -2323,9 +2331,9 @@ Native matrix:
   no listener when off, bearer-token rejection and acceptance, token generation,
   activity-log content from both
   server shapes, and tailnet exposure through `tailscale serve`
-- Release archives expose both executable identities with matching Windows PE
-  icons, Linux XDG metadata and SVGs, and validated macOS app bundles and ICNS
-  resources
+- Native release packages expose both executable identities with matching
+  Windows PE icons, a branded Linux AppImage with XDG metadata and `.DirIcon`,
+  and validated macOS app bundles and ICNS resources
 
 ## Decision Log
 
@@ -2356,3 +2364,4 @@ Native matrix:
 | 2026-07-22 | Bind HTTP to localhost and require generated auth        | Tailscale Serve supplies HTTPS without exposing the backend directly to LAN peers                               |
 | 2026-07-22 | Move to evidence-triggered maintenance after v2.1.1      | No remaining candidate feature earns permanent product surface without observed repeated friction               |
 | 2026-07-22 | Package both executable identities with native icons     | PE resources, XDG metadata, and app bundles provide OS integration without adding a packaging framework          |
+| 2026-07-22 | Replace raw archives with native release packages        | A per-user installer, one AppImage, and one DMG make the brand visible without merging the two runtime contracts |
