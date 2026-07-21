@@ -28,10 +28,13 @@ impl TodoPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Add a todo, Enter to save"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Add a todo, Shift+Enter to save")
+                .auto_grow(1, 6)
+        });
         let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
-            if let InputEvent::PressEnter { .. } = event {
+            if let InputEvent::PressEnter { secondary: true } = event {
                 this.add_from_input(window, cx);
             }
         });
@@ -219,12 +222,7 @@ impl Render for TodoPanel {
                     .border_t_1()
                     .border_color(theme.border)
                     .p_1()
-                    .child(
-                        Input::new(&self.input)
-                            .h(px(24.0))
-                            .bg(theme.surface_background)
-                            .border_color(theme.border),
-                    ),
+                    .child(Input::new(&self.input).appearance(false)),
             )
     }
 }

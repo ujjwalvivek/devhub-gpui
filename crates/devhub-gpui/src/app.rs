@@ -103,6 +103,15 @@ impl IconNamed for MdToggleIcon {
     }
 }
 
+#[derive(Clone, Copy)]
+struct McpIcon;
+
+impl IconNamed for McpIcon {
+    fn path(self) -> SharedString {
+        "mcp.svg".into()
+    }
+}
+
 actions!(
     devhub,
     [
@@ -7863,44 +7872,32 @@ impl Render for DevHubLite {
                     })
                     .child({
                         let mcp_on = self.mcp_server.is_some();
-                        let label = match self.mcp_server.as_ref() {
-                            Some(server) => format!("MCP :{}", server.port()),
-                            None => "MCP off".to_string(),
+                        let style = if mcp_on {
+                            ButtonCustomVariant::new(cx)
+                                .foreground(theme.success)
+                                .hover(theme.surface_hover)
+                                .active(theme.surface_selected)
+                        } else {
+                            ButtonCustomVariant::new(cx)
+                                .foreground(theme.text_disabled)
+                                .hover(theme.surface_hover)
+                                .active(theme.surface_selected)
                         };
-                        div()
-                            .id("mcp-indicator")
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_1()
-                            .h(px(18.0))
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(theme.surface_hover))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| this.toggle_mcp_server(cx)),
-                            )
+                        let app = cx.entity();
+                        Button::new("mcp-indicator")
+                            .icon(McpIcon)
+                            .tooltip("Left click: toggle server · Right click: activity log")
+                            .xsmall()
+                            .compact()
+                            .custom(style)
+                            .on_click(move |_, _window, cx| {
+                                app.update(cx, |this, cx| this.toggle_mcp_server(cx));
+                            })
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(|this, _, window, cx| {
                                     this.open_mcp_activity(window, cx);
                                 }),
-                            )
-                            .child(div().size(px(5.0)).rounded_full().bg(if mcp_on {
-                                theme.success
-                            } else {
-                                theme.text_disabled
-                            }))
-                            .child(
-                                div()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(9.0))
-                                    .text_color(if mcp_on {
-                                        theme.text
-                                    } else {
-                                        theme.text_disabled
-                                    })
-                                    .child(label),
                             )
                     }),
             )

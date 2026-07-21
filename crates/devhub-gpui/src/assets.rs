@@ -39,6 +39,9 @@ impl AssetSource for Assets {
                 "../assets/md-preview.svg"
             ))));
         }
+        if path == "mcp.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/mcp.svg"))));
+        }
         gpui_component_assets::Assets.load(path)
     }
 
@@ -51,6 +54,7 @@ impl AssetSource for Assets {
             assets.push("scan-search.svg".into());
             assets.push("md-code.svg".into());
             assets.push("md-preview.svg".into());
+            assets.push("mcp.svg".into());
         }
         Ok(assets)
     }
