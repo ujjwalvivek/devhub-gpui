@@ -753,6 +753,8 @@ mod tests {
         let root = test_directory("tools-git");
         write_files(&root);
         run_git(&root, &["init", "-q"]);
+        run_git(&root, &["config", "user.name", "DevHub Test"]);
+        run_git(&root, &["config", "user.email", "devhub@example.invalid"]);
         run_git(&root, &["add", "."]);
         run_git(&root, &["commit", "-qm", "initial"]);
         std::fs::write(
