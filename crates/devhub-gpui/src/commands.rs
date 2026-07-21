@@ -29,7 +29,7 @@ pub enum CommandId {
     SelectTheme,
     ShowSettings,
     ToggleTerminal,
-    ToggleAskProject,
+    ToggleTodoPanel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,10 +204,10 @@ pub const COMMANDS: [CommandSpec; 28] = [
         shortcut: Some("Ctrl+`"),
     },
     CommandSpec {
-        id: CommandId::ToggleAskProject,
-        title: "Toggle Ask Project",
+        id: CommandId::ToggleTodoPanel,
+        title: "Toggle Project Todos",
         category: "View",
-        shortcut: Some("Ctrl+Shift+A"),
+        shortcut: Some("Ctrl+Shift+T"),
     },
 ];
 

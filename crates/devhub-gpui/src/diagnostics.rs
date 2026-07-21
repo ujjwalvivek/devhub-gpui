@@ -65,6 +65,7 @@ fn store_label(store: PersistenceStore) -> &'static str {
     match store {
         PersistenceStore::Config => "Config",
         PersistenceStore::ProjectCache => "Project cache",
+        PersistenceStore::Todos => "Todos",
     }
 }
 

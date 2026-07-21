@@ -1,4 +1,3 @@
-mod ai;
 mod cache;
 mod cancellation;
 mod config;
@@ -7,15 +6,9 @@ mod git;
 mod persistence;
 mod remote;
 mod ssh;
+mod todos;
 mod workspace;
 
-pub use ai::{
-    clear_project_context, delete_zen_api_key, fetch_opencode_models,
-    load_or_build_project_context, parse_architecture_response, question_excerpts,
-    store_zen_api_key, stream_opencode_answer, zen_api_key_exists, ArchitectureEdge,
-    ArchitectureGraph, ArchitectureNode, ArchitectureResponse, OpenCodeService, ProjectContext,
-    ProjectContextFile, ZenError, ZenErrorKind, ZenModel,
-};
 pub use cache::{
     cache_path, load_projects, load_projects_with_diagnostics, save_projects,
     save_projects_with_diagnostics,
@@ -47,6 +40,7 @@ pub use remote::{
     scan_remote_host_cancellable, shell_quote, validate_remote_path, validate_ssh_host,
     zed_ssh_uri, DirectoryEntry,
 };
+pub use todos::{load_todos, save_project_todos, todo_key, todos_path, TodoItem, TodoMap};
 pub use workspace::{
     list_local_subdirs, list_project_tree, list_project_tree_cancellable, list_tree,
     list_tree_cancellable, local_roots, read_file, read_project_file,

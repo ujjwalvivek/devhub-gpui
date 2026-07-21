@@ -10,6 +10,7 @@ const NO_FAULT: usize = usize::MAX;
 pub enum PersistenceStore {
     Config,
     ProjectCache,
+    Todos,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

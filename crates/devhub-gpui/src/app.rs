@@ -1,6 +1,6 @@
-use crate::ask::{AskPanel, CloseAskPanel, OpenAskPath};
 use crate::assets::Assets;
 use crate::platform::{begin_window_drag, configure_windows_surface, toggle_window_zoom};
+use crate::todo::{TodoPanel, TodosChanged};
 use crate::ui::{
     file_icon, message_panel, project_type_color, scan_state_color, scan_status, section_label,
     window_control, workbench_message,
@@ -12,14 +12,14 @@ use devhub_core::{
     git_stage_cancellable, git_status_cancellable, git_status_summary_cancellable,
     git_switch_branch_cancellable, git_unstage_all_cancellable, git_unstage_cancellable,
     list_local_subdirs, list_project_tree_cancellable, list_remote_subdirs_cancellable,
-    load_projects_with_diagnostics, local_roots, open_project_in_zed,
-    read_project_file_cancellable, read_project_readme_cancellable, save_projects_with_diagnostics,
-    scan_directories_cancellable, scan_remote_host_cancellable, search_project_content_cancellable,
-    sort_projects, validate_remote_path, validate_ssh_host, AppearanceMode, CancellationToken,
-    CommitEntry, CommitFileChange, Config, DirectoryEntry, FileEntry, GitBranch, GitDiffKind,
-    GitError, GitErrorKind, GitFileChange, GitOperationResult, GitStatus, PersistenceEvent,
-    PersistenceFailure, Project, ProjectLocator, RemoteHostConfig, SearchHit, ThemeId, TreeListing,
-    HISTORY_PAGE_SIZE,
+    load_projects_with_diagnostics, load_todos, local_roots, open_project_in_zed,
+    read_project_file_cancellable, read_project_readme_cancellable, save_project_todos,
+    save_projects_with_diagnostics, scan_directories_cancellable, scan_remote_host_cancellable,
+    search_project_content_cancellable, sort_projects, todo_key, validate_remote_path,
+    validate_ssh_host, AppearanceMode, CancellationToken, CommitEntry, CommitFileChange, Config,
+    DirectoryEntry, FileEntry, GitBranch, GitDiffKind, GitError, GitErrorKind, GitFileChange,
+    GitOperationResult, GitStatus, PersistenceEvent, PersistenceFailure, Project, ProjectLocator,
+    RemoteHostConfig, SearchHit, ThemeId, TodoItem, TreeListing, HISTORY_PAGE_SIZE,
 };
 use devhub_gpui::{
     detect_editors, filtered_commands, filtered_editors, filtered_project_indices, filtered_themes,
@@ -88,6 +88,19 @@ impl IconNamed for ScanSearchIcon {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MdToggleIcon(pub bool);
+
+impl IconNamed for MdToggleIcon {
+    fn path(self) -> SharedString {
+        if self.0 {
+            "md-code.svg".into()
+        } else {
+            "md-preview.svg".into()
+        }
+    }
+}
+
 actions!(
     devhub,
     [
@@ -110,7 +123,7 @@ actions!(
         DismissLauncher,
         AcceptLauncher,
         ToggleTerminal,
-        ToggleAskProject,
+        ToggleTodoPanel,
     ]
 );
 
@@ -147,8 +160,8 @@ struct DevHubLite {
     terminal_visible: bool,
     terminal_entity: Option<Entity<TerminalPanel>>,
     terminal_owner: Option<ProjectLocator>,
-    ask_panel_visible: bool,
-    ask_panel_entity: Option<Entity<AskPanel>>,
+    todo_panel_visible: bool,
+    todo_panel_entity: Option<Entity<TodoPanel>>,
     context_pane_visible: bool,
     tree_state: LoadState<TreeListing>,
     tree_generation: u64,
@@ -227,7 +240,7 @@ struct DevHubLite {
     git_context_width_px: f32,
     project_catalog_width_px: f32,
     terminal_height_px: f32,
-    ask_panel_width_px: f32,
+    todo_panel_width_px: f32,
     resize_target: Option<ResizeTarget>,
     context_menu: Option<(usize, f32, f32)>,
 }
@@ -253,7 +266,7 @@ enum ResizeTarget {
     WorkspaceContext,
     ProjectCatalog,
     Terminal,
-    AskPanel,
+    TodoPanel,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -414,8 +427,8 @@ impl DevHubLite {
             terminal_visible: false,
             terminal_entity: None,
             terminal_owner: None,
-            ask_panel_visible: false,
-            ask_panel_entity: None,
+            todo_panel_visible: false,
+            todo_panel_entity: None,
             context_pane_visible: true,
             tree_state: LoadState::Idle,
             tree_generation: 0,
@@ -494,7 +507,7 @@ impl DevHubLite {
             git_context_width_px: 285.0,
             project_catalog_width_px: 276.0,
             terminal_height_px: 200.0,
-            ask_panel_width_px: 360.0,
+            todo_panel_width_px: 360.0,
             resize_target: None,
             context_menu: None,
         }
@@ -831,9 +844,9 @@ impl DevHubLite {
         if self.terminal_owner.as_ref() != Some(&owner) {
             self.end_terminal_session();
         }
-        self.end_ask_session(cx);
         self.selected = Some(project_index);
         self.missing_project = None;
+        self.refresh_todo_panel(cx);
         self.remember_project(&project);
         if let Some(row) = visible_project_row(&self.filtered_indices(), self.selected) {
             self.project_scroll
@@ -1951,7 +1964,7 @@ impl DevHubLite {
             CommandId::SelectTheme => self.open_launcher(LauncherMode::Themes, window, cx),
             CommandId::ShowSettings => self.open_settings(window, cx),
             CommandId::ToggleTerminal => self.toggle_terminal(window, cx),
-            CommandId::ToggleAskProject => self.toggle_ask_project(window, cx),
+            CommandId::ToggleTodoPanel => self.toggle_todo_panel(window, cx),
         }
     }
 
@@ -1959,7 +1972,7 @@ impl DevHubLite {
         match command {
             CommandId::OpenInZed
             | CommandId::OpenInEditor
-            | CommandId::ToggleAskProject
+            | CommandId::ToggleTodoPanel
             | CommandId::ToggleProjectPin
             | CommandId::HideProject
             | CommandId::CopyProjectPath => self.selected_project().is_some(),
@@ -2065,7 +2078,7 @@ impl DevHubLite {
             self.project_scroll.scroll_to_item(0, ScrollStrategy::Top);
         } else {
             self.end_terminal_session();
-            self.end_ask_session(cx);
+            self.todo_panel_visible = false;
             self.selected = None;
             self.reset_workspace(cx);
         }
@@ -3431,16 +3444,6 @@ impl DevHubLite {
         self.terminal_visible = false;
     }
 
-    fn end_ask_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(entity) = self.ask_panel_entity.take() {
-            entity.update(cx, |panel, _| panel.end_session());
-        }
-        self.ask_panel_visible = false;
-        if self.resize_target == Some(ResizeTarget::AskPanel) {
-            self.resize_target = None;
-        }
-    }
-
     fn spawn_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project().cloned() else {
             return;
@@ -3503,63 +3506,93 @@ impl DevHubLite {
         cx.notify();
     }
 
-    fn toggle_ask_project_action(
+    fn toggle_todo_panel_action(
         &mut self,
-        _: &ToggleAskProject,
+        _: &ToggleTodoPanel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_ask_project(window, cx);
+        self.toggle_todo_panel(window, cx);
     }
 
-    fn toggle_ask_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_todo_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project().cloned() else {
             return;
         };
-        if self.ask_panel_visible {
-            self.ask_panel_visible = false;
+        if self.todo_panel_visible {
+            self.todo_panel_visible = false;
             self.resize_target = None;
             window.focus(&self.focus_handle);
             cx.notify();
             return;
         }
 
-        if let Some(entity) = self.ask_panel_entity.as_ref() {
-            entity.update(cx, |panel, cx| panel.set_project(project, cx));
+        let items = self.load_todo_items(&project);
+        if let Some(entity) = self.todo_panel_entity.as_ref() {
+            entity.update(cx, |panel, cx| {
+                panel.set_project(project.name.clone(), items, cx);
+                panel.focus_input(window, cx);
+            });
         } else {
             let theme = Theme::for_preferences(
                 self.config.theme,
                 self.config.appearance,
                 window.appearance(),
             );
-            let entity = cx.new(|cx| AskPanel::new(project, theme, window, cx));
-            cx.subscribe(&entity, |this, _, _: &CloseAskPanel, cx| {
-                this.ask_panel_visible = false;
-                this.resize_target = None;
-                cx.notify();
+            let name = project.name.clone();
+            let entity = cx.new(|cx| TodoPanel::new(name, items, theme, window, cx));
+            cx.subscribe(&entity, |this, _, event: &TodosChanged, cx| {
+                this.save_todos(&event.0, cx);
             })
             .detach();
-            cx.subscribe(&entity, |this, _, event: &OpenAskPath, cx| {
-                this.git_refresh_generation = this.git_refresh_generation.wrapping_add(1);
-                this.show_settings = false;
-                this.context_menu = None;
-                this.git_context_menu = None;
-                this.activity = Activity::Files;
-                this.context_pane_visible = true;
-                if matches!(this.tree_state, LoadState::Idle) {
-                    this.load_tree(cx);
-                }
-                this.selected_file = Some(event.0.clone());
-                this.pending_document_line = None;
-                this.load_file_content(cx);
-                cx.notify();
-            })
-            .detach();
-            self.ask_panel_entity = Some(entity);
+            self.todo_panel_entity = Some(entity);
         }
         self.show_settings = false;
-        self.ask_panel_visible = true;
+        self.todo_panel_visible = true;
         self.resize_target = None;
+        cx.notify();
+    }
+
+    fn refresh_todo_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.todo_panel_visible {
+            return;
+        }
+        let Some(project) = self.selected_project().cloned() else {
+            return;
+        };
+        let items = self.load_todo_items(&project);
+        if let Some(entity) = self.todo_panel_entity.as_ref() {
+            entity.update(cx, |panel, cx| {
+                panel.set_project(project.name.clone(), items, cx);
+            });
+        }
+    }
+
+    fn load_todo_items(&mut self, project: &Project) -> Vec<TodoItem> {
+        match load_todos() {
+            Ok(report) => {
+                self.persistence_history.record_events(report.events);
+                report
+                    .value
+                    .get(&todo_key(project))
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            Err(error) => {
+                self.record_persistence_failure(error);
+                Vec::new()
+            }
+        }
+    }
+
+    fn save_todos(&mut self, items: &[TodoItem], cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project() else {
+            return;
+        };
+        match save_project_todos(&todo_key(project), items) {
+            Ok(report) => self.persistence_history.record_events(report.events),
+            Err(error) => self.record_persistence_failure(error),
+        }
         cx.notify();
     }
 
@@ -4012,14 +4045,15 @@ impl DevHubLite {
                                     .text_color(theme.text)
                                     .child(project.name.clone()),
                             )
-                            .child(
-                                Button::new("readme-mode-toggle")
-                                    .label(if self.readme_preview {
-                                        "Raw"
+                            .child(div().flex().items_center().gap_1().child({
+                                let app = app.clone();
+                                Button::new("readme-toggle")
+                                    .icon(MdToggleIcon(self.readme_preview))
+                                    .tooltip(if self.readme_preview {
+                                        "View raw"
                                     } else {
-                                        "Preview"
+                                        "View preview"
                                     })
-                                    .tooltip("Toggle README rendering")
                                     .small()
                                     .compact()
                                     .ghost()
@@ -4028,8 +4062,8 @@ impl DevHubLite {
                                             this.readme_preview = !this.readme_preview;
                                             cx.notify();
                                         });
-                                    }),
-                            ),
+                                    })
+                            })),
                     )
                     .child(
                         div()
@@ -7238,14 +7272,14 @@ impl Render for DevHubLite {
             .launcher
             .is_some()
             .then(|| self.launcher_panel(theme, window, cx));
-        let ask_panel = (!self.show_settings && self.ask_panel_visible)
-            .then_some(self.ask_panel_entity.as_ref())
+        let todo_panel = (!self.show_settings && self.todo_panel_visible)
+            .then_some(self.todo_panel_entity.as_ref())
             .flatten()
             .map(|entity| {
                 entity.update(cx, |panel, _| panel.set_theme(theme));
-                let dragging = self.resize_target == Some(ResizeTarget::AskPanel);
+                let dragging = self.resize_target == Some(ResizeTarget::TodoPanel);
                 div()
-                    .w(px(self.ask_panel_width_px))
+                    .w(px(self.todo_panel_width_px))
                     .min_w(px(280.0))
                     .max_w(px(560.0))
                     .h_full()
@@ -7255,7 +7289,7 @@ impl Render for DevHubLite {
                     .border_color(theme.border)
                     .child(
                         div()
-                            .id("ask-panel-resize-handle")
+                            .id("todo-panel-resize-handle")
                             .w(px(4.0))
                             .h_full()
                             .flex_shrink_0()
@@ -7265,7 +7299,7 @@ impl Render for DevHubLite {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                                    this.resize_target = Some(ResizeTarget::AskPanel);
+                                    this.resize_target = Some(ResizeTarget::TodoPanel);
                                     cx.stop_propagation();
                                     cx.notify();
                                 }),
@@ -7296,7 +7330,7 @@ impl Render for DevHubLite {
             .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::toggle_context_pane))
             .on_action(cx.listener(Self::toggle_terminal_action))
-            .on_action(cx.listener(Self::toggle_ask_project_action))
+            .on_action(cx.listener(Self::toggle_todo_panel_action))
             .on_action(cx.listener(Self::dismiss_launcher))
             .on_action(cx.listener(Self::accept_launcher))
             .on_action(cx.listener(Self::note_component_copy))
@@ -7557,7 +7591,7 @@ impl Render for DevHubLite {
                                     .bg(theme.panel_background)
                                     .child(self.render_details_panel(theme, window, cx)),
                             )
-                            .when_some(ask_panel, |workspace, panel| workspace.child(panel))
+                            .when_some(todo_panel, |workspace, panel| workspace.child(panel))
                             .into_any()
                     }),
             )
@@ -7672,21 +7706,21 @@ impl Render for DevHubLite {
                     })
                     .child({
                         let app = cx.entity();
-                        let style = if self.ask_panel_visible {
+                        let style = if self.todo_panel_visible {
                             active_chrome_button_style
                         } else {
                             chrome_button_style
                         };
-                        Button::new("toggle-ask-project")
-                            .icon(IconName::Bot)
-                            .tooltip("Ask Project (Ctrl+Shift+A)")
+                        Button::new("toggle-todo-panel")
+                            .icon(IconName::CircleCheck)
+                            .tooltip("Project Todos (Ctrl+Shift+T)")
                             .xsmall()
                             .compact()
                             .custom(style)
                             .disabled(self.selected_project().is_none())
                             .on_click(move |_, window, cx| {
                                 app.update(cx, |this, cx| {
-                                    this.toggle_ask_project(window, cx);
+                                    this.toggle_todo_panel(window, cx);
                                 });
                             })
                     }),
@@ -7899,7 +7933,7 @@ impl Render for DevHubLite {
                         ),
                 )
                 .into_any()
-        } else if self.resize_target == Some(ResizeTarget::AskPanel) {
+        } else if self.resize_target == Some(ResizeTarget::TodoPanel) {
             div()
                 .relative()
                 .size_full()
@@ -7914,7 +7948,7 @@ impl Render for DevHubLite {
                             let win_w: f32 = window.bounds().size.width.into();
                             let raw_x: f32 = event.position.x.into();
                             let max_width = (win_w - 320.0).clamp(280.0, 560.0);
-                            this.ask_panel_width_px = (win_w - raw_x).clamp(280.0, max_width);
+                            this.todo_panel_width_px = (win_w - raw_x).clamp(280.0, max_width);
                             cx.notify();
                         }))
                         .on_mouse_up(
@@ -8806,7 +8840,7 @@ pub(crate) fn run() {
             KeyBinding::new("ctrl-6", ShowHistory, Some("DevHub")),
             KeyBinding::new("ctrl-b", ToggleContextPane, Some("DevHub")),
             KeyBinding::new("ctrl-`", ToggleTerminal, Some("DevHub")),
-            KeyBinding::new("ctrl-shift-a", ToggleAskProject, Some("DevHub")),
+            KeyBinding::new("ctrl-shift-t", ToggleTodoPanel, Some("DevHub")),
             KeyBinding::new("up", SelectPreviousProject, Some("Input && DevHubLauncher")),
             KeyBinding::new("down", SelectNextProject, Some("Input && DevHubLauncher")),
             KeyBinding::new("home", SelectFirstProject, Some("Input && DevHubLauncher")),
