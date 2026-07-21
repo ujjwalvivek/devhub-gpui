@@ -58,35 +58,42 @@ fn initialize_body() -> &'static str {
 }
 
 #[test]
-fn http_server_serves_tools_over_streamable_http() {
+fn http_server_serves_tools_over_stateless_streamable_http() {
     let server = McpHttpServer::start(0, "secret".to_string()).expect("start server");
     assert!(server.address().ip().is_loopback());
 
     let (status, response) = post(server.port(), initialize_body(), None, Some("secret"));
     assert_eq!(status, 200, "initialize response: {response}");
     assert!(response.contains("devhub-mcp"), "response: {response}");
-    let session = header(&response, "mcp-session-id")
-        .expect("session header")
-        .to_string();
+    assert!(
+        header(&response, "mcp-session-id").is_none(),
+        "stateless server issued a session: {response}"
+    );
+    assert!(
+        response
+            .to_lowercase()
+            .contains("content-type: application/json"),
+        "initialize response was not JSON: {response}"
+    );
 
     let (status, _) = post(
         server.port(),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        Some(&session),
+        None,
         Some("secret"),
     );
     assert!(status == 200 || status == 202);
 
     let (status, response) = post(
         server.port(),
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}"#,
-        Some(&session),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        None,
         Some("secret"),
     );
-    assert_eq!(status, 200, "tools/call response: {response}");
-    assert!(response.contains("catalog_as_of"), "response: {response}");
+    assert_eq!(status, 200, "tools/list response: {response}");
+    assert!(response.contains("list_projects"), "response: {response}");
 
-    server.stop();
+    server.stop().expect("stop server cleanly");
 }
 
 #[test]
@@ -102,7 +109,7 @@ fn http_server_accepts_tailscale_serve_host_header() {
     );
 
     assert_eq!(status, 200, "tailnet initialize response: {response}");
-    server.stop();
+    server.stop().expect("stop server cleanly");
 }
 
 #[test]
@@ -119,7 +126,7 @@ fn http_server_always_enforces_bearer_token() {
     let (status, response) = post(server.port(), initialize_body(), None, Some("secret"));
     assert_eq!(status, 200, "authorized response: {response}");
 
-    server.stop();
+    server.stop().expect("stop server cleanly");
 }
 
 #[test]
@@ -128,7 +135,7 @@ fn stopping_the_server_closes_the_listener() {
     let port = server.port();
     assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
 
-    server.stop();
+    server.stop().expect("stop server cleanly");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(("127.0.0.1", port)).is_ok() {

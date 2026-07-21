@@ -2650,7 +2650,9 @@ impl DevHubLite {
                 self.show_settings = false;
                 if restart_mcp {
                     if let Some(server) = self.mcp_server.take() {
-                        server.stop();
+                        if let Err(error) = server.stop() {
+                            self.launch_error = Some(format!("MCP server: {error}"));
+                        }
                     }
                     self.start_mcp_http_server();
                 }
@@ -3792,8 +3794,17 @@ impl DevHubLite {
     }
 
     fn toggle_mcp_server(&mut self, cx: &mut Context<Self>) {
+        let restart_failed = self
+            .mcp_server
+            .as_ref()
+            .is_some_and(|server| !server.is_running());
         if let Some(server) = self.mcp_server.take() {
-            server.stop();
+            if let Err(error) = server.stop() {
+                self.launch_error = Some(format!("MCP server: {error}"));
+            }
+            if restart_failed {
+                self.start_mcp_http_server();
+            }
         } else {
             self.start_mcp_http_server();
         }
@@ -8068,7 +8079,22 @@ impl Render for DevHubLite {
                             })
                     })
                     .child({
-                        let mcp_on = self.mcp_server.is_some();
+                        let mcp_on = self
+                            .mcp_server
+                            .as_ref()
+                            .is_some_and(McpHttpServer::is_running);
+                        let tooltip = self
+                            .mcp_server
+                            .as_ref()
+                            .and_then(McpHttpServer::failure)
+                            .map(|error| {
+                                format!(
+                                    "MCP stopped: {error} · Left click: restart · Right click: activity log"
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                "Left click: toggle server · Right click: activity log".to_string()
+                            });
                         let style = if mcp_on {
                             ButtonCustomVariant::new(cx)
                                 .foreground(theme.success)
@@ -8083,7 +8109,7 @@ impl Render for DevHubLite {
                         let app = cx.entity();
                         Button::new("mcp-indicator")
                             .icon(McpIcon)
-                            .tooltip("Left click: toggle server · Right click: activity log")
+                            .tooltip(tooltip)
                             .xsmall()
                             .compact()
                             .custom(style)
