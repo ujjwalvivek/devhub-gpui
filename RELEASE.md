@@ -1,8 +1,15 @@
-# DevHub 2.1.2
+# DevHub 2.1.3
 
-This maintenance update hardens project identity, SSH platform behavior, process ownership, and MCP exposure, then replaces raw release archives with branded native packages.
+This maintenance update closes cross-platform MCP reliability gaps while preserving the branded native packages introduced in 2.1.2.
 
 ## Highlights
+
+### Reliability
+
+- MCP file paths now reject Windows drive paths, UNC paths, and backslash traversal on every server platform, including when a Linux DevHub instance serves Windows projects over SSH.
+- Remote file reads identify binary content before UTF-8 decoding, so binary files return the intended refusal instead of a misleading SSH encoding error.
+- Windows SSH failures suppress PowerShell progress/CLIXML framing while preserving the useful error message.
+- The HTTP server is covered by concurrent authenticated requests, repeated start/stop cycles, tailnet Host headers, rejected credentials, and real-client reconnect tests.
 
 ### DevHub MCP Server (`devhub-mcp`)
 
@@ -41,7 +48,7 @@ There are two ways to connect DevHub to your editor:
 Packaged stdio commands are:
 
 - Windows: `C:\Users\<you>\AppData\Local\Programs\DevHub\devhub-mcp.exe`
-- Linux: `/path/to/DevHub-2.1.2-x86_64.AppImage` with
+- Linux: `/path/to/DevHub-2.1.3-x86_64.AppImage` with
   `"args": ["--mcp-stdio"]`
 - macOS: `/Applications/DevHub MCP.app/Contents/MacOS/devhub-mcp`
 
@@ -68,9 +75,9 @@ Lightweight per-project todo tracking accessible via `devhub-mcp list_todos` and
 
 ## Artifacts
 
-- Windows x64: `DevHub-Setup-2.1.2-x64.exe`
-- Linux x64: `DevHub-2.1.2-x86_64.AppImage`
-- macOS Apple Silicon: `DevHub-2.1.2-arm64.dmg`
+- Windows x64: `DevHub-Setup-2.1.3-x64.exe`
+- Linux x64: `DevHub-2.1.3-x86_64.AppImage`
+- macOS Apple Silicon: `DevHub-2.1.3-arm64.dmg`
 
 Every package contains both executable identities, `README.md`, `RELEASE.md`, and `LICENSE`. Platform integration remains native and small:
 

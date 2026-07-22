@@ -610,11 +610,17 @@ fn diff_kinds(change: &GitFileChange) -> Vec<GitDiffKind> {
 }
 
 fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let relative_path = Path::new(relative.trim());
+    let trimmed = relative.trim();
+    let normalized = trimmed.replace('\\', "/");
+    let relative_path = Path::new(&normalized);
     if relative_path.as_os_str().is_empty() {
         return Err("file path is empty".to_string());
     }
-    if relative_path.is_absolute()
+    let bytes = normalized.as_bytes();
+    let has_windows_drive_prefix =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if has_windows_drive_prefix
+        || relative_path.is_absolute()
         || relative_path.components().any(|component| {
             matches!(
                 component,
@@ -772,7 +778,17 @@ mod tests {
         assert!(tool_read_file(&project, "../outside", 1, 10).is_err());
         assert!(tool_read_file(&project, "src/../../outside", 1, 10).is_err());
         assert!(tool_read_file(&project, "/absolute/path", 1, 10).is_err());
+        assert!(tool_read_file(&project, "C:/Windows/win.ini", 1, 10).is_err());
+        assert!(tool_read_file(&project, r"C:\Windows\win.ini", 1, 10).is_err());
+        assert!(tool_read_file(&project, r"C:Windows\win.ini", 1, 10).is_err());
+        assert!(tool_read_file(&project, r"\\server\share\file", 1, 10).is_err());
+        assert!(tool_read_file(&project, r"..\outside", 1, 10).is_err());
+        assert!(tool_read_file(&project, r"src\..\outside", 1, 10).is_err());
         assert!(tool_read_file(&project, "   ", 1, 10).is_err());
+        assert_eq!(
+            safe_join(&root, r"src\main.rs").unwrap(),
+            root.join("src/main.rs")
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

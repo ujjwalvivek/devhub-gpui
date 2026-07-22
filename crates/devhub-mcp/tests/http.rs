@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 use devhub_mcp::http::McpHttpServer;
 
@@ -145,4 +146,73 @@ fn stopping_the_server_closes_the_listener() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn http_server_survives_concurrent_restart_and_auth_soak() {
+    const RESTARTS: usize = 10;
+    const CONCURRENT_REQUESTS: usize = 20;
+    const TOOLS_LIST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+
+    let started = Instant::now();
+    let mut successful_requests = 0;
+    for cycle in 0..RESTARTS {
+        let token = format!("secret-{cycle}");
+        let server = McpHttpServer::start(0, token.clone()).expect("start server");
+        let port = server.port();
+        let barrier = Arc::new(Barrier::new(CONCURRENT_REQUESTS + 1));
+        let responses = std::thread::scope(|scope| {
+            let handles = (0..CONCURRENT_REQUESTS)
+                .map(|request| {
+                    let barrier = barrier.clone();
+                    let token = token.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let body = if request % 2 == 0 {
+                            initialize_body()
+                        } else {
+                            TOOLS_LIST
+                        };
+                        post_with_host(
+                            port,
+                            "devhub.example-tailnet.ts.net",
+                            body,
+                            None,
+                            Some(&token),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("join HTTP request"))
+                .collect::<Vec<_>>()
+        });
+
+        for (request, (status, response)) in responses.into_iter().enumerate() {
+            assert_eq!(status, 200, "cycle {cycle}, request {request}: {response}");
+            let expected = if request % 2 == 0 {
+                "devhub-mcp"
+            } else {
+                "list_projects"
+            };
+            assert!(
+                response.contains(expected),
+                "cycle {cycle}, request {request}: {response}"
+            );
+            successful_requests += 1;
+        }
+
+        assert_eq!(post(port, initialize_body(), None, None).0, 401);
+        assert_eq!(post(port, initialize_body(), None, Some("wrong")).0, 401);
+        server.stop().expect("stop server cleanly");
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    assert_eq!(successful_requests, RESTARTS * CONCURRENT_REQUESTS);
+    eprintln!(
+        "HTTP soak completed: {successful_requests} concurrent requests, {RESTARTS} restarts in {:?}",
+        started.elapsed()
+    );
 }

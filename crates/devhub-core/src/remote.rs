@@ -420,10 +420,13 @@ cat -- "$path"
         limit = MAX_FILE_BYTES,
         kib = MAX_FILE_BYTES / 1024,
     );
-    decode_remote_text(
-        run_ssh_script_for_path(host, &path, &script, SSH_OPERATION_TIMEOUT, cancellation)?
-            .into_bytes(),
-    )
+    decode_remote_text(run_ssh_script_for_path_bytes(
+        host,
+        &path,
+        &script,
+        SSH_OPERATION_TIMEOUT,
+        cancellation,
+    )?)
 }
 
 pub fn read_remote_readme(host: &str, root: &Path) -> Result<Option<String>, String> {
@@ -508,12 +511,23 @@ fn run_ssh_script_for_path(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
+    let bytes = run_ssh_script_for_path_bytes(host, path, script, timeout, cancellation)?;
+    String::from_utf8(bytes).map_err(|_| "SSH output is not valid UTF-8".into())
+}
+
+fn run_ssh_script_for_path_bytes(
+    host: &str,
+    path: &str,
+    script: &str,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, String> {
     let bytes = if is_windows_remote_path(path) {
         run_windows_ssh_script_bytes(host, script, timeout, cancellation)?
     } else {
         run_ssh_script_bytes(host, script, timeout, cancellation)?
     };
-    String::from_utf8(bytes).map_err(|_| "SSH output is not valid UTF-8".into())
+    Ok(bytes)
 }
 
 pub(crate) fn run_ssh_script_bytes(
@@ -537,7 +551,8 @@ pub(crate) fn run_windows_ssh_script_bytes(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, String> {
-    let bootstrap = r#"$candidates = @(
+    let bootstrap = r#"$ProgressPreference = 'SilentlyContinue'
+$candidates = @(
     (Get-Command sh.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
     "$env:ProgramFiles\Git\bin\sh.exe",
     "${env:ProgramFiles(x86)}\Git\bin\sh.exe"
@@ -558,6 +573,8 @@ exit $process.ExitCode
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-OutputFormat",
+            "Text",
             "-EncodedCommand",
             &encoded,
         ],
@@ -584,7 +601,8 @@ fn run_powershell_command(
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<String, String> {
-    let encoded = encode_powershell_command(script);
+    let script = format!("$ProgressPreference = 'SilentlyContinue'\n{script}");
+    let encoded = encode_powershell_command(&script);
     run_ssh_command(
         host,
         &[
@@ -592,6 +610,8 @@ fn run_powershell_command(
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-OutputFormat",
+            "Text",
             "-EncodedCommand",
             &encoded,
         ],
@@ -629,8 +649,7 @@ fn run_ssh_command_bytes(
         .run(cmd, input)
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
+        let detail = sanitize_ssh_stderr(&output.stderr);
         return Err(if detail.is_empty() {
             format!(
                 "SSH operation failed for {host} with status {}",
@@ -641,6 +660,22 @@ fn run_ssh_command_bytes(
         });
     }
     Ok(output.stdout)
+}
+
+fn sanitize_ssh_stderr(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let Some(marker) = text.find("#< CLIXML") else {
+        return text.trim().to_string();
+    };
+    let before = text[..marker].trim();
+    let after = &text[marker + "#< CLIXML".len()..];
+    let after = after.split("<Objs").next().unwrap_or(after).trim();
+    match (before.is_empty(), after.is_empty()) {
+        (false, false) => format!("{before}\n{after}"),
+        (false, true) => before.to_string(),
+        (true, false) => after.to_string(),
+        (true, true) => String::new(),
+    }
 }
 
 pub fn is_windows_remote_path(path: &str) -> bool {
@@ -830,6 +865,30 @@ mod tests {
         assert_eq!(validate_remote_path(r" /srv\code ").unwrap(), "/srv/code");
         assert!(validate_remote_path("/srv\nbad").is_err());
         assert!(validate_remote_path("\t").is_err());
+    }
+
+    #[test]
+    fn powershell_clixml_is_removed_from_ssh_errors() {
+        let noisy =
+            b"#< CLIXML\r\nnot a file<Objs Version=\"1.1.0.1\"><Obj S=\"progress\" /></Objs>";
+        assert_eq!(sanitize_ssh_stderr(noisy), "not a file");
+        assert_eq!(sanitize_ssh_stderr(b"plain failure\r\n"), "plain failure");
+        assert_eq!(
+            sanitize_ssh_stderr(b"useful\r\n#< CLIXML\r\n<Objs Version=\"1.1.0.1\" />"),
+            "useful"
+        );
+    }
+
+    #[test]
+    fn remote_text_decoder_refuses_binary_content_clearly() {
+        assert_eq!(
+            decode_remote_text(vec![b'a', 0, b'b']).unwrap_err(),
+            "binary file preview is not supported"
+        );
+        assert_eq!(
+            decode_remote_text(vec![0xff]).unwrap_err(),
+            "file is not valid UTF-8 text"
+        );
     }
 
     #[test]

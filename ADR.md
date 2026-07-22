@@ -34,7 +34,7 @@ investments or explicit platform boundaries.
 
 ## Status
 
-- Current stage: DevHub-GPUI v2.1.2 — project hub with Git, terminal, command
+- Current stage: DevHub-GPUI v2.1.3 — project hub with Git, terminal, command
   palette, IDE detection, MCP project intelligence, and todo list
   - Git integration: branch picker, unified diffs, commit history, commit box,
   commit graph, staged/unstaged file actions, Fetch, Push
@@ -223,6 +223,10 @@ investments or explicit platform boundaries.
   executable identities, and a macOS disk image containing separate branded GUI
   and MCP app bundles. Optional Windows signing and macOS signing/notarization
   use release secrets without changing local builds.
+- V2.1.3 reliability closure on 2026-07-22: made MCP path containment independent
+  of the server OS, preserved binary refusal for remote files, removed PowerShell
+  CLIXML framing from Windows SSH errors, and added direct HTTP concurrency,
+  restart, authentication, Host-header, and real-client reconnect coverage.
 
 
 The plan was approved on 2026-06-30. Phase 1 created only the minimal scaffold;
@@ -2293,10 +2297,10 @@ child process, and no release claim unsupported by validation.
 
 ## Next action
 
-Close v2.1.1 with the full static gate and native checks for Tailscale Serve,
-Linux window decorations, and Linux-to-Windows SSH. After release, DevHub moves
-to defect-only maintenance. P1 and P2 items remain trigger-only; a new feature
-must satisfy Feature Admission with observed evidence before implementation.
+Close v2.1.3 with the full static gate and native checks for Tailscale Serve and
+Linux-to-Windows SSH. After release, continue defect-only maintenance. P1 and P2
+items remain trigger-only; a new feature must satisfy Feature Admission with
+observed evidence before implementation.
 
 ## Validation
 
@@ -2365,3 +2369,5 @@ Native matrix:
 | 2026-07-22 | Move to evidence-triggered maintenance after v2.1.1      | No remaining candidate feature earns permanent product surface without observed repeated friction               |
 | 2026-07-22 | Package both executable identities with native icons     | PE resources, XDG metadata, and app bundles provide OS integration without adding a packaging framework          |
 | 2026-07-22 | Replace raw archives with native release packages        | A per-user installer, one AppImage, and one DMG make the brand visible without merging the two runtime contracts |
+| 2026-07-22 | Validate MCP paths independently of the server OS        | Linux servers must reject Windows absolute and traversal syntax before routing a request to a Windows SSH host   |
+| 2026-07-22 | Require direct HTTP stress evidence for concurrency      | Client-side serialization should not trigger an unproven server architecture change                              |
