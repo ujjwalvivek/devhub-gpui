@@ -9284,6 +9284,12 @@ pub(crate) fn run() {
                 ..Default::default()
             },
             |window, cx| {
+                #[cfg(target_os = "linux")]
+                {
+                    // GPUI 0.2.2 does not apply the initial title on Wayland.
+                    window.set_window_title("DevHub");
+                    window.set_app_id("devhub-gpui");
+                }
                 configure_windows_surface(window);
                 let app = cx.new(|cx| DevHubLite::new(window, cx));
                 app.update(cx, |this, cx| this.restore_last_project(cx));

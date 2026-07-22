@@ -34,7 +34,7 @@ investments or explicit platform boundaries.
 
 ## Status
 
-- Current stage: DevHub-GPUI v2.1.3 — project hub with Git, terminal, command
+- Current stage: DevHub-GPUI v2.1.4 — project hub with Git, terminal, command
   palette, IDE detection, MCP project intelligence, and todo list
   - Git integration: branch picker, unified diffs, commit history, commit box,
   commit graph, staged/unstaged file actions, Fetch, Push
@@ -227,6 +227,9 @@ investments or explicit platform boundaries.
   of the server OS, preserved binary refusal for remote files, removed PowerShell
   CLIXML framing from Windows SSH errors, and added direct HTTP concurrency,
   restart, authentication, Host-header, and real-client reconnect coverage.
+- V2.1.4 Linux integration closure on 2026-07-22: explicitly reapplied the
+  runtime Wayland title and application ID after window creation, working around
+  GPUI 0.2.2 dropping the initial title from compositor application switchers.
 
 
 The plan was approved on 2026-06-30. Phase 1 created only the minimal scaffold;
@@ -2297,10 +2300,10 @@ child process, and no release claim unsupported by validation.
 
 ## Next action
 
-Close v2.1.3 with the full static gate and native checks for Tailscale Serve and
-Linux-to-Windows SSH. After release, continue defect-only maintenance. P1 and P2
-items remain trigger-only; a new feature must satisfy Feature Admission with
-observed evidence before implementation.
+Close v2.1.4 with the full static gate and a native KDE Wayland Alt+Tab check.
+After release, continue defect-only maintenance. P1 and P2 items remain
+trigger-only; a new feature must satisfy Feature Admission with observed
+evidence before implementation.
 
 ## Validation
 
