@@ -25,31 +25,31 @@ Linux:
 These are not unfinished parity work. They are possible post-v1.1.0 product
 investments or explicit platform boundaries.
 
-| Capability                             | Complexity | Notes                                                                                                                                                                                               |
-| -------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-source scan status and errors      | Low        | ScanModel already tracks aggregate state; per-source tracking needs per-root error/result fields and UI per-project-row indicators                                                                  |
-| Manual refresh per root or host        | Medium     | Requires source-level refresh button and per-source cancellation routing; the cancellation infrastructure now exists                                                                                |
-| Global full-text search index (`grep`) | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query — a significant standalone feature                                                                             |
-| SSH host command environment           | N/A        | POSIX hosts use standard shell tools. Windows hosts require PowerShell plus Git for Windows, whose bundled `sh`, `find`, `grep`, `stat`, `wc`, `head`, and `cat` run the same bounded scripts. SFTP-only and Windows hosts without Git for Windows remain unsupported. |
+| Capability                             | Complexity | Notes                                                                                                                |
+| -------------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| Per-source scan status and errors      | Low        | ScanModel already tracks aggregate state                                                                             |
+| Manual refresh per root or host        | Medium     | Requires source-level refresh button and per-source cancellation routing                                             |
+| Global full-text search index (`grep`) | High       | Persistent incremental index file, watched filesystem events, hybrid local/SSH query, significant standalone feature |
+| SSH host command environment           | N/A        | SFTP-only and Windows hosts without Git for Windows remain unsupported.                                              |
 
 ## Status
 
 - Current stage: DevHub-GPUI v2.1.4 — project hub with Git, terminal, command
   palette, IDE detection, MCP project intelligence, and todo list
   - Git integration: branch picker, unified diffs, commit history, commit box,
-  commit graph, staged/unstaged file actions, Fetch, Push
+    commit graph, staged/unstaged file actions, Fetch, Push
   - Embedded pseudo-terminal per project with PTY, resize, scrollback, pinning,
-  lifecycle ownership, and SSH routing
+    lifecycle ownership, and SSH routing
   - Recoverable persistence with atomic backups, writer locking, startup
-  recovery, stale-recovery conflict detection
+    recovery, stale-recovery conflict detection
   - Metadata-driven editor launcher: auto-detect IDEs from platform metadata,
-  filter JetBrains entries by project evidence
+    filter JetBrains entries by project evidence
   - Command palette with keyboard-first navigation and live theme preview
   - Read-only MCP server (`devhub-mcp` crate): stdio binary for external agents
-    + in-app loopback HTTP server with toggle and required bearer token auth
+    - in-app loopback HTTP server with toggle and required bearer token auth
   - Per-project todo list persisted across restarts, SSH projects included
   - The old OpenCode chat harness and credential storage were deleted — MCP
-  clients bring their own models
+    clients bring their own models
 - Completed stage: DevHub-GPUI v1.1.0 complete within the approved functional-parity scope:
   - Local + SSH discovery, tree, read, README, search
   - Cancellation of all in-flight operations (scan, tree, file, readme, search)
@@ -230,7 +230,6 @@ investments or explicit platform boundaries.
 - V2.1.4 Linux integration closure on 2026-07-22: explicitly reapplied the
   runtime Wayland title and application ID after window creation, working around
   GPUI 0.2.2 dropping the initial title from compositor application switchers.
-
 
 The plan was approved on 2026-06-30. Phase 1 created only the minimal scaffold;
 no DevHub source was copied and no Git operation or DevHub modification occurred.
@@ -2344,33 +2343,33 @@ Native matrix:
 
 ## Decision Log
 
-| Date       | Decision                                                 | Reason                                                                                                          |
-| ---------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 2026-07-20 | Treat V2 as the v3 baseline, not an open feature backlog | Prevent completed work from being repeatedly redesigned                                                         |
-| 2026-07-20 | Make process ownership and project identity P0           | Involuntary terminals and stale cross-project state break trust                                                 |
-| 2026-07-20 | Keep network work explicit                               | Local-first describes default behavior, not the absence of SSH or Git remotes                                   |
-| 2026-07-20 | Keep README media offline                                | Predictable reading matters more than automatic media loading                                                   |
-| 2026-07-20 | Improve existing Git depth before adding commands        | The daily repository loop has more value than feature-count parity                                              |
-| 2026-07-20 | Detect editors from platform/product metadata            | Machine-specific paths and generic native pickers launch the wrong targets                                      |
-| 2026-07-20 | Filter specialized IDEs by project evidence              | An editor entry earns its place only when it can serve the selected project                                     |
-| 2026-07-20 | Require measured evidence for performance architecture   | Catalog size alone does not justify indexing or background complexity                                           |
-| 2026-07-20 | Keep P2 explicitly uncommitted                           | Candidate ideas must not silently become roadmap promises                                                       |
-| 2026-07-20 | Add read-only natural-language project intelligence      | Project understanding is the most valuable missing hub workflow                                                 |
-| 2026-07-20 | Use only OpenCode Zen and Go for V3 inference            | One provider and one key keep setup and implementation bounded                                                  |
-| 2026-07-20 | Port GitDiagram's validated generation shape locally     | Diagrams should understand local and SSH projects without embedding a web app                                   |
-| 2026-07-20 | Persist bounded project context locally                  | Reopening an unchanged project should not repeat repository analysis                                            |
-| 2026-07-21 | Replace Ask Project with read-only MCP tools             | The chat harness was the unmaintainable part; retrieval already works and external agents orchestrate it better |
-| 2026-07-21 | Delete the OpenCode provider and credential storage      | With MCP, clients bring their own models; DevHub stores no keys                                                 |
-| 2026-07-21 | Serve tools as a stdio binary plus toggle-explicit in-app HTTP | stdio works with the app closed; the HTTP listener supports LAN and reverse-proxied tailnet access             |
-| 2026-07-21 | Repurpose the side panel as a per-project todo list      | Pre-handoff context earns the slot the chat panel vacates                                                       |
-| 2026-07-21 | Defer architecture diagrams                              | Diagram generation lost its host surface when the panel was removed                                             |
-| 2026-07-21 | Replace MCP status indicator with an SVG icon button     | Matches other status-bar buttons and adds tooltip for left/right click actions                                  |
-| 2026-07-21 | Use auto-grow multi-line input for the todo text field   | Wraps long text and grows vertically instead of overflowing horizontally                                        |
-| 2026-07-21 | Submit todo on Shift+Enter in multi-line input           | Enter inserts newline; Shift+Enter adds the todo item, consistent with textarea convention                      |
-| 2026-07-22 | Keep stdio as a small companion and HTTP inside DevHub   | Editors own stdio pipes; the explicit in-app toggle owns the tailnet HTTP lifetime                              |
-| 2026-07-22 | Bind HTTP to localhost and require generated auth        | Tailscale Serve supplies HTTPS without exposing the backend directly to LAN peers                               |
-| 2026-07-22 | Move to evidence-triggered maintenance after v2.1.1      | No remaining candidate feature earns permanent product surface without observed repeated friction               |
-| 2026-07-22 | Package both executable identities with native icons     | PE resources, XDG metadata, and app bundles provide OS integration without adding a packaging framework          |
-| 2026-07-22 | Replace raw archives with native release packages        | A per-user installer, one AppImage, and one DMG make the brand visible without merging the two runtime contracts |
-| 2026-07-22 | Validate MCP paths independently of the server OS        | Linux servers must reject Windows absolute and traversal syntax before routing a request to a Windows SSH host   |
-| 2026-07-22 | Require direct HTTP stress evidence for concurrency      | Client-side serialization should not trigger an unproven server architecture change                              |
+| Date       | Decision                                                       | Reason                                                                                                           |
+| ---------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 2026-07-20 | Treat V2 as the v3 baseline, not an open feature backlog       | Prevent completed work from being repeatedly redesigned                                                          |
+| 2026-07-20 | Make process ownership and project identity P0                 | Involuntary terminals and stale cross-project state break trust                                                  |
+| 2026-07-20 | Keep network work explicit                                     | Local-first describes default behavior, not the absence of SSH or Git remotes                                    |
+| 2026-07-20 | Keep README media offline                                      | Predictable reading matters more than automatic media loading                                                    |
+| 2026-07-20 | Improve existing Git depth before adding commands              | The daily repository loop has more value than feature-count parity                                               |
+| 2026-07-20 | Detect editors from platform/product metadata                  | Machine-specific paths and generic native pickers launch the wrong targets                                       |
+| 2026-07-20 | Filter specialized IDEs by project evidence                    | An editor entry earns its place only when it can serve the selected project                                      |
+| 2026-07-20 | Require measured evidence for performance architecture         | Catalog size alone does not justify indexing or background complexity                                            |
+| 2026-07-20 | Keep P2 explicitly uncommitted                                 | Candidate ideas must not silently become roadmap promises                                                        |
+| 2026-07-20 | Add read-only natural-language project intelligence            | Project understanding is the most valuable missing hub workflow                                                  |
+| 2026-07-20 | Use only OpenCode Zen and Go for V3 inference                  | One provider and one key keep setup and implementation bounded                                                   |
+| 2026-07-20 | Port GitDiagram's validated generation shape locally           | Diagrams should understand local and SSH projects without embedding a web app                                    |
+| 2026-07-20 | Persist bounded project context locally                        | Reopening an unchanged project should not repeat repository analysis                                             |
+| 2026-07-21 | Replace Ask Project with read-only MCP tools                   | The chat harness was the unmaintainable part; retrieval already works and external agents orchestrate it better  |
+| 2026-07-21 | Delete the OpenCode provider and credential storage            | With MCP, clients bring their own models; DevHub stores no keys                                                  |
+| 2026-07-21 | Serve tools as a stdio binary plus toggle-explicit in-app HTTP | stdio works with the app closed; the HTTP listener supports LAN and reverse-proxied tailnet access               |
+| 2026-07-21 | Repurpose the side panel as a per-project todo list            | Pre-handoff context earns the slot the chat panel vacates                                                        |
+| 2026-07-21 | Defer architecture diagrams                                    | Diagram generation lost its host surface when the panel was removed                                              |
+| 2026-07-21 | Replace MCP status indicator with an SVG icon button           | Matches other status-bar buttons and adds tooltip for left/right click actions                                   |
+| 2026-07-21 | Use auto-grow multi-line input for the todo text field         | Wraps long text and grows vertically instead of overflowing horizontally                                         |
+| 2026-07-21 | Submit todo on Shift+Enter in multi-line input                 | Enter inserts newline; Shift+Enter adds the todo item, consistent with textarea convention                       |
+| 2026-07-22 | Keep stdio as a small companion and HTTP inside DevHub         | Editors own stdio pipes; the explicit in-app toggle owns the tailnet HTTP lifetime                               |
+| 2026-07-22 | Bind HTTP to localhost and require generated auth              | Tailscale Serve supplies HTTPS without exposing the backend directly to LAN peers                                |
+| 2026-07-22 | Move to evidence-triggered maintenance after v2.1.1            | No remaining candidate feature earns permanent product surface without observed repeated friction                |
+| 2026-07-22 | Package both executable identities with native icons           | PE resources, XDG metadata, and app bundles provide OS integration without adding a packaging framework          |
+| 2026-07-22 | Replace raw archives with native release packages              | A per-user installer, one AppImage, and one DMG make the brand visible without merging the two runtime contracts |
+| 2026-07-22 | Validate MCP paths independently of the server OS              | Linux servers must reject Windows absolute and traversal syntax before routing a request to a Windows SSH host   |
+| 2026-07-22 | Require direct HTTP stress evidence for concurrency            | Client-side serialization should not trigger an unproven server architecture change                              |
