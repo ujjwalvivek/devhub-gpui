@@ -1,13 +1,15 @@
-# DevHub 2.1.4
+# DevHub 2.1.5
 
-This Linux desktop integration update restores DevHub's title and icon identity in Wayland application switchers.
+This update lets the HTTP MCP server run without the desktop window, so a service manager can keep it up across reboots.
 
 ## Highlights
 
-### Linux Wayland Integration
+### Headless HTTP MCP server
 
-- DevHub now explicitly publishes its `DevHub` window title and `devhub-gpui` application ID after GPUI creates the native Linux window.
-- This works around GPUI 0.2.2 dropping the initial title on Wayland, allowing KDE and other compositors to render the correct Alt+Tab title and resolve the installed AppImage icon.
+- `devhub-mcp --http` serves the same Streamable HTTP endpoint as the in-app switch, on `127.0.0.1` with the port and bearer token saved in DevHub's settings. If no token exists yet, it creates and saves one, as the app does on first start.
+- The Linux AppImage forwards `--mcp-http` to it, next to the existing `--mcp-stdio`.
+- The process exits with an error if the server stops, so systemd (or any supervisor) can restart it.
+- Run either the headless server or the in-app switch, not both: they share the port, and whichever starts second reports the port as in use.
 
 ### DevHub MCP Server (`devhub-mcp`)
 
@@ -46,7 +48,7 @@ There are two ways to connect DevHub to your editor:
 Packaged stdio commands are:
 
 - Windows: `C:\Users\<you>\AppData\Local\Programs\DevHub\devhub-mcp.exe`
-- Linux: `/path/to/DevHub-2.1.4-x86_64.AppImage` with
+- Linux: `/path/to/DevHub-2.1.5-x86_64.AppImage` with
   `"args": ["--mcp-stdio"]`
 - macOS: `/Applications/DevHub MCP.app/Contents/MacOS/devhub-mcp`
 
@@ -65,6 +67,24 @@ Packaged stdio commands are:
 }
 ```
 
+**Option C: Headless HTTP (service)**: run the same server without the window, for example as a systemd user service:
+
+```ini
+[Unit]
+Description=DevHub MCP over HTTP
+After=network-online.target
+
+[Service]
+ExecStart=/path/to/DevHub-2.1.5-x86_64.AppImage --mcp-http
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+It uses the port and token from DevHub's settings, so clients configured for Option B keep working. Leave the in-app switch off while the service runs.
+
 DevHub generates a 256-bit HTTP token on first start. Copy or regenerate it from Settings. For tailnet access, run `tailscale serve --bg http://127.0.0.1:47821`, use the resulting HTTPS URL ending in `/mcp`, and send the same bearer header. Reverse-proxy Host headers are accepted; direct LAN binding is intentionally disabled. HTTP tool calls use stateless Streamable HTTP JSON responses, avoiding long-lived MCP sessions through the proxy.
 
 ### Todo List
@@ -73,9 +93,9 @@ Lightweight per-project todo tracking accessible via `devhub-mcp list_todos` and
 
 ## Artifacts
 
-- Windows x64: `DevHub-Setup-2.1.4-x64.exe`
-- Linux x64: `DevHub-2.1.4-x86_64.AppImage`
-- macOS Apple Silicon: `DevHub-2.1.4-arm64.dmg`
+- Windows x64: `DevHub-Setup-2.1.5-x64.exe`
+- Linux x64: `DevHub-2.1.5-x86_64.AppImage`
+- macOS Apple Silicon: `DevHub-2.1.5-arm64.dmg`
 
 Every package contains both executable identities, `README.md`, `RELEASE.md`, and `LICENSE`. Platform integration remains native and small:
 

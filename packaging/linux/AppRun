@@ -8,4 +8,9 @@ if [ "${1:-}" = "--mcp-stdio" ]; then
     exec "$appdir/usr/bin/devhub-mcp" "$@"
 fi
 
+if [ "${1:-}" = "--mcp-http" ]; then
+    shift
+    exec "$appdir/usr/bin/devhub-mcp" --http "$@"
+fi
+
 exec "$appdir/usr/bin/devhub-gpui" "$@"
