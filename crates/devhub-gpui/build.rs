@@ -7,7 +7,11 @@ fn main() {
 
     println!("cargo:rerun-if-changed={SVG_PATH}");
     #[cfg(windows)]
-    app_icon::embed_windows(SVG_PATH);
+    {
+        println!("cargo:rerun-if-env-changed=DEVHUB_WINDOWS_ICON_OUT");
+        let icon_out = std::env::var_os("DEVHUB_WINDOWS_ICON_OUT").map(std::path::PathBuf::from);
+        app_icon::embed_windows(SVG_PATH, icon_out.as_deref());
+    }
     #[cfg(target_os = "macos")]
     {
         println!("cargo:rerun-if-env-changed=DEVHUB_MACOS_ICONSET_OUT");

@@ -7,5 +7,5 @@ fn main() {
 
     println!("cargo:rerun-if-changed={SVG_PATH}");
     #[cfg(windows)]
-    app_icon::embed_windows(SVG_PATH);
+    app_icon::embed_windows(SVG_PATH, None);
 }
