@@ -49,11 +49,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
             executable: devhub-gpui
             mcp_executable: devhub-mcp
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             executable: devhub-gpui
             mcp_executable: devhub-mcp
     runs-on: ${{ matrix.os }}
+    env:
+      DEVHUB_WINDOWS_ICON_OUT: ${{ runner.temp }}/devhub-appicon.ico
 
     steps:
       - uses: actions/checkout@v4
@@ -174,9 +176,11 @@ jobs:
           Copy-Item 'target\${{ matrix.target }}\release\${{ matrix.mcp_executable }}' "$source\devhub-mcp.exe"
           Copy-Item README.md, RELEASE.md, LICENSE $source
 
-          $icon = Get-ChildItem 'target\${{ matrix.target }}\release\build\devhub-gpui-*\out\appicon.ico' |
-            Select-Object -First 1
-          if (-not $icon) { throw 'The generated Windows application icon was not found.' }
+          $iconPath = $env:DEVHUB_WINDOWS_ICON_OUT
+          if (-not (Test-Path $iconPath)) {
+            throw "The generated Windows application icon was not found at $iconPath."
+          }
+          $icon = Get-Item -LiteralPath $iconPath
           $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
           if (-not $iscc) {
             $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'

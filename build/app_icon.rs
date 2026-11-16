@@ -2,7 +2,7 @@
 use std::env;
 #[cfg(any(windows, target_os = "macos"))]
 use std::fs;
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 use std::path::Path;
 #[cfg(any(windows, target_os = "macos"))]
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ fn render_icon(tree: &resvg::usvg::Tree, size: u32) -> Vec<u8> {
 }
 
 #[cfg(windows)]
-pub fn embed_windows(svg_relative_path: &str) {
+pub fn embed_windows(svg_relative_path: &str, icon_out: Option<&Path>) {
     const ICON_SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
 
     let tree = load_svg(svg_relative_path);
@@ -38,6 +38,13 @@ pub fn embed_windows(svg_relative_path: &str) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let icon_path = out_dir.join("appicon.ico");
     fs::write(&icon_path, encode_ico(&images)).expect("write appicon.ico");
+
+    if let Some(icon_out) = icon_out {
+        if let Some(parent) = icon_out.parent() {
+            fs::create_dir_all(parent).expect("create app icon output directory");
+        }
+        fs::copy(&icon_path, icon_out).expect("copy appicon.ico to the requested output path");
+    }
 
     winresource::WindowsResource::new()
         .set_icon(icon_path.to_str().expect("UTF-8 app icon path"))
