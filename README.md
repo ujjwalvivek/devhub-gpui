@@ -38,7 +38,7 @@ Packaged builds are available from
 Releases use one native package per platform:
 
 - Windows: `DevHub-Setup-<version>-x64.exe` installs both icon-bearing executables for the current user.
-- Linux: `DevHub-<version>-x86_64.AppImage` is the branded desktop artifact and contains both executables. Run it normally for DevHub, pass `--mcp-stdio` when configuring a local MCP client, or `--mcp-http` to serve the HTTP MCP endpoint without the desktop window (for a service manager). Its desktop metadata and `.DirIcon` provide the DevHub icon to supporting launchers and file managers.
+- Linux: `DevHub-<version>-x86_64.AppImage` is the branded desktop artifact and contains both executables. Run it normally for DevHub, pass `--mcp-stdio` when configuring a local MCP client, `--mcp-http` to serve the HTTP MCP endpoint without the desktop window (for a service manager), or `--mcp-scan` to rescan the project catalog without the window (for a timer). Its desktop metadata and `.DirIcon` provide the DevHub icon to supporting launchers and file managers.
 - macOS: `DevHub-<version>-arm64.dmg` contains branded `DevHub.app` and `DevHub MCP.app` bundles. Configure stdio clients with `/Applications/DevHub MCP.app/Contents/MacOS/devhub-mcp`.
 
 Linux ELF and macOS Mach-O command files do not carry a Finder-style icon resource themselves. The AppImage and `.app` bundles are therefore the branded files users see; extracting and browsing their internal command binaries can still show a generic executable icon.

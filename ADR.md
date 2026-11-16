@@ -34,7 +34,7 @@ investments or explicit platform boundaries.
 
 ## Status
 
-- Current stage: DevHub-GPUI v2.1.5: project hub with Git, terminal, command
+- Current stage: DevHub-GPUI v2.1.6: project hub with Git, terminal, command
   palette, IDE detection, MCP project intelligence, and todo list
   - Git integration: branch picker, unified diffs, commit history, commit box,
     commit graph, staged/unstaged file actions, Fetch, Push
@@ -234,6 +234,10 @@ investments or explicit platform boundaries.
   `--mcp-http`) serves the existing HTTP endpoint without the GUI, reusing the
   saved port and token. Observed need: after every reboot the agents on two
   machines lost DevHub's MCP until someone opened the app and toggled the switch.
+- V2.1.6 headless catalog rescan on 2026-11-17: `devhub-mcp --scan` (AppImage
+  `--mcp-scan`) runs Refresh Projects without the GUI and keeps unreachable SSH
+  hosts' last-known projects. Observed need: the catalog only refreshed when
+  someone opened the app and rescanned, so new projects stayed invisible to agents.
 
 The plan was approved on 2026-06-30. Phase 1 created only the minimal scaffold;
 no DevHub source was copied and no Git operation or DevHub modification occurred.
@@ -2303,8 +2307,8 @@ child process, and no release claim unsupported by validation.
 
 ## Next action
 
-Close v2.1.5 with the full static gate and a native check of the headless HTTP
-server under a systemd user service on Linux.
+Close v2.1.6 with the full static gate and a native check of the headless scan
+under a systemd user timer on Linux.
 After release, continue defect-only maintenance. P1 and P2 items remain
 trigger-only; a new feature must satisfy Feature Admission with observed
 evidence before implementation.

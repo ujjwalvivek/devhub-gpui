@@ -13,4 +13,9 @@ if [ "${1:-}" = "--mcp-http" ]; then
     exec "$appdir/usr/bin/devhub-mcp" --http "$@"
 fi
 
+if [ "${1:-}" = "--mcp-scan" ]; then
+    shift
+    exec "$appdir/usr/bin/devhub-mcp" --scan "$@"
+fi
+
 exec "$appdir/usr/bin/devhub-gpui" "$@"

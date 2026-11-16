@@ -1,8 +1,32 @@
-# DevHub 2.1.5
+# DevHub 2.1.6
 
-This update lets the HTTP MCP server run without the desktop window, so a service manager can keep it up across reboots.
+This update adds a headless catalog rescan, so the project list stays current without opening the app.
 
 ## Highlights
+
+### Headless catalog rescan
+
+- `devhub-mcp --scan` runs the same scan as Refresh Projects (local folders and SSH hosts from DevHub's settings) and saves the catalog cache that the app and the MCP tools read. The MCP tools read that cache on every call, so a running server sees the new catalog straight away.
+- An SSH host that cannot be reached keeps its last-known projects, so an unattended run never drops a machine that is only asleep. The scan fails without touching the cache if no source can be scanned.
+- The Linux AppImage forwards `--mcp-scan` to it. A systemd user timer can run it on a schedule:
+
+```ini
+# devhub-scan.service
+[Service]
+Type=oneshot
+ExecStart=/path/to/DevHub-2.1.6-x86_64.AppImage --mcp-scan
+
+# devhub-scan.timer
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+File contents, git status, diffs and history were already read live; only the list of projects and its metadata needed a rescan.
 
 ### Headless HTTP MCP server
 
@@ -48,7 +72,7 @@ There are two ways to connect DevHub to your editor:
 Packaged stdio commands are:
 
 - Windows: `C:\Users\<you>\AppData\Local\Programs\DevHub\devhub-mcp.exe`
-- Linux: `/path/to/DevHub-2.1.5-x86_64.AppImage` with
+- Linux: `/path/to/DevHub-2.1.6-x86_64.AppImage` with
   `"args": ["--mcp-stdio"]`
 - macOS: `/Applications/DevHub MCP.app/Contents/MacOS/devhub-mcp`
 
@@ -75,7 +99,7 @@ Description=DevHub MCP over HTTP
 After=network-online.target
 
 [Service]
-ExecStart=/path/to/DevHub-2.1.5-x86_64.AppImage --mcp-http
+ExecStart=/path/to/DevHub-2.1.6-x86_64.AppImage --mcp-http
 Restart=on-failure
 RestartSec=10
 
@@ -93,9 +117,9 @@ Lightweight per-project todo tracking accessible via `devhub-mcp list_todos` and
 
 ## Artifacts
 
-- Windows x64: `DevHub-Setup-2.1.5-x64.exe`
-- Linux x64: `DevHub-2.1.5-x86_64.AppImage`
-- macOS Apple Silicon: `DevHub-2.1.5-arm64.dmg`
+- Windows x64: `DevHub-Setup-2.1.6-x64.exe`
+- Linux x64: `DevHub-2.1.6-x86_64.AppImage`
+- macOS Apple Silicon: `DevHub-2.1.6-arm64.dmg`
 
 Every package contains both executable identities, `README.md`, `RELEASE.md`, and `LICENSE`. Platform integration remains native and small:
 
