@@ -55,7 +55,7 @@ jobs:
             mcp_executable: devhub-mcp
     runs-on: ${{ matrix.os }}
     env:
-      DEVHUB_WINDOWS_ICON_OUT: ${{ runner.temp }}/devhub-appicon.ico
+      DEVHUB_WINDOWS_ICON_OUT: ${{ github.workspace }}/target/appicon.ico
 
     steps:
       - uses: actions/checkout@v4
